@@ -76,7 +76,7 @@
   "scripts": {
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "vsce package"
+    "package": "npm run compile && vsce package"
   },
   "devDependencies": {
     "@halcyontech/vscode-ibmi-types": "^2.0.0",
