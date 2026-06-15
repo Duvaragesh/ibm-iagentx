@@ -3,12 +3,12 @@
   "displayName": "IBM iAgentX",
   "description": "Extends IBM i resources (source members, IFS, SQL, job logs) into VS Code AI agents — GitHub Copilot Chat and Claude Code — via MCP.",
   "version": "0.1.0",
-  "publisher": "dotDK",
+  "publisher": "Duvaragesh",
   "license": "MIT",
   "readme": "MARKETPLACE.md",
   "repository": {
     "type": "git",
-    "url": "https://github.com/dotDK/ibm-iagentx"
+    "url": "https://github.com/Duvaragesh/ibm-iagentx"
   },
   "engines": {
     "vscode": "^1.99.0"

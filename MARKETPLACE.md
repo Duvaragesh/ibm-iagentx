@@ -1,6 +1,6 @@
 # IBM iAgentX
 
-**Bring your IBM i system into VS Code AI agents — GitHub Copilot Chat, Claude Code, and IBM watsonx Code Assistant (Bob).**
+**Bring your IBM i system into VS Code AI agents — GitHub Copilot Chat, Claude Code, and IBM Bob.**
 
 IBM iAgentX exposes IBM i resources (source members, IFS files, SQL, job logs, CL commands)
 to AI coding agents via the Model Context Protocol (MCP). It reuses the active SSH connection
@@ -30,7 +30,7 @@ Everything happens through the existing Code for IBM i SSH session.
 - One or more of the supported AI agents:
   - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)
   - GitHub Copilot Chat (built into VS Code)
-  - IBM watsonx Code Assistant / Bob
+  - IBM Bob
 
 ---
 
@@ -39,7 +39,7 @@ Everything happens through the existing Code for IBM i SSH session.
 Install from the Marketplace or via the command line:
 
 ```bash
-code --install-extension dotDK.ibm-iagentx
+code --install-extension Duvaragesh.ibm-iagentx
 ```
 
 No manual configuration required — the extension auto-configures Claude Code and VS Code
@@ -60,7 +60,7 @@ The extension registers itself via VS Code's MCP provider API and writes to
 `%APPDATA%/Code/User/mcp.json` (Windows) or the platform equivalent.
 Copilot Chat picks this up without any manual steps.
 
-### IBM watsonx Code Assistant / Bob
+### IBM Bob
 
 IBM Bob reads the same `mcp.json` entry — no extra configuration needed.
 
@@ -133,4 +133,4 @@ then restart Claude Code.
 
 ## License
 
-MIT — [GitHub: dotDK/ibm-iagentx](https://github.com/dotDK/ibm-iagentx)
+MIT — [GitHub: Duvaragesh/ibm-iagentx](https://github.com/Duvaragesh/ibm-iagentx)

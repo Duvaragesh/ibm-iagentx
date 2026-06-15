@@ -1,6 +1,6 @@
 # IBM iAgentX
 
-**Extends IBM i resources into VS Code AI agents — GitHub Copilot Chat, Claude Code, and IBM watsonx Code Assistant (Bob).**
+**Extends IBM i resources into VS Code AI agents — GitHub Copilot Chat, Claude Code, and IBM Bob.**
 
 IBM iAgentX is a VS Code extension that bridges your IBM i system (AS/400, iSeries) to
 AI coding agents via the Model Context Protocol (MCP). It reuses the active SSH connection
@@ -30,7 +30,7 @@ pull job logs, and run CL commands — all directly from the AI chat.
 - VS Code 1.99 or later
 - [Code for IBM i](https://marketplace.visualstudio.com/items?itemName=halcyontechltd.code-for-ibmi) — installed and connected to an IBM i system
 - Claude Code CLI (for MCP tool use outside VS Code)
-- IBM watsonx Code Assistant (Bob) — for IBM i COBOL/RPG modernisation workflows
+- IBM Bob — for IBM i COBOL/RPG modernisation workflows
 
 ---
 
@@ -39,7 +39,7 @@ pull job logs, and run CL commands — all directly from the AI chat.
 **Prerequisites:** Node.js 18+ and npm.
 
 ```bash
-git clone https://github.com/dotDK/ibm-iagentx.git
+git clone https://github.com/Duvaragesh/ibm-iagentx.git
 cd ibm-iagentx
 npm install
 npm run package
@@ -92,7 +92,7 @@ The extension writes to `%APPDATA%/Code/User/mcp.json` (Windows) or the platform
 equivalent, and registers itself via VS Code's MCP provider API. Copilot Chat picks
 this up without any manual configuration.
 
-### IBM watsonx Code Assistant / Bob (automatic)
+### IBM Bob (automatic)
 
 IBM Bob also reads `mcp.json` for MCP server discovery. No additional configuration
 is required — the same entry written for Copilot is picked up by Bob automatically.
@@ -254,7 +254,7 @@ Add the verb prefix to `ibm-iagentx.clAllowedPrefixes` in VS Code settings.
 ## Architecture
 
 ```
-Claude Code (CLI)  /  GitHub Copilot Chat  /  IBM Bob (watsonx Code Assistant)
+Claude Code (CLI)  /  GitHub Copilot Chat  /  IBM Bob
         │
         │  MCP over HTTP+SSE
         │  GET /sse  →  opens event stream
@@ -291,4 +291,4 @@ MIT
 
 ---
 
-[GitHub: dotDK/ibm-iagentx](https://github.com/dotDK/ibm-iagentx)
+[GitHub: Duvaragesh/ibm-iagentx](https://github.com/Duvaragesh/ibm-iagentx)
