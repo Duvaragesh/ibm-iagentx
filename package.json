@@ -1,0 +1,88 @@
+{
+  "name": "ibm-iagentx",
+  "displayName": "IBM iAgentX",
+  "description": "Extends IBM i resources (source members, IFS, SQL, job logs) into VS Code AI agents — GitHub Copilot Chat and Claude Code — via MCP.",
+  "version": "0.1.0",
+  "publisher": "dotDK",
+  "license": "MIT",
+  "readme": "MARKETPLACE.md",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dotDK/ibm-iagentx"
+  },
+  "engines": {
+    "vscode": "^1.99.0"
+  },
+  "categories": [
+    "Other",
+    "AI"
+  ],
+  "keywords": [
+    "IBM i",
+    "AS400",
+    "iSeries",
+    "MCP",
+    "Claude Code",
+    "Copilot",
+    "watsonx",
+    "IBM Bob",
+    "AI agent"
+  ],
+  "extensionPack": [
+    "halcyontechltd.code-for-ibmi"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "mcpServerDefinitionProviders": [
+      {
+        "id": "ibm-iagentx",
+        "label": "IBM iAgentX"
+      }
+    ],
+    "commands": [
+      {
+        "command": "ibm-iagentx.reconnect",
+        "title": "IBM iAgentX: Reconnect",
+        "category": "IBM iAgentX"
+      }
+    ],
+    "configuration": {
+      "title": "IBM iAgentX",
+      "properties": {
+        "ibm-iagentx.sqlMaxRows": {
+          "type": "number",
+          "default": 100,
+          "minimum": 1,
+          "maximum": 1000,
+          "description": "Default maximum rows returned by ibmi_run_sql (1–1000)."
+        },
+        "ibm-iagentx.clAllowedPrefixes": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["DSP", "LST", "WRK", "CHK", "PRT", "DMP", "RTV", "QRY"],
+          "description": "CL command verb prefixes permitted by ibmi_run_cl_command."
+        },
+        "ibm-iagentx.preferredPort": {
+          "type": "number",
+          "default": 41927,
+          "description": "Preferred HTTP port for the MCP server (falls back to +4 consecutive ports if busy)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@halcyontech/vscode-ibmi-types": "^2.0.0",
+    "@types/node": "^25.9.3",
+    "@types/vscode": "^1.99.0",
+    "@vscode/vsce": "^3.0.0",
+    "typescript": "^5.4.0"
+  }
+}

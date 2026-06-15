@@ -1,0 +1,5 @@
+node_modules/
+out/
+*.vsix
+.claude/
+PLAN_VSCODE_IBMI_MCP.md

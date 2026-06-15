@@ -1,0 +1,10 @@
+.vscode/**
+.claude/**
+src/**
+node_modules/**
+*.map
+tsconfig.json
+PLAN_VSCODE_IBMI_MCP.md
+README.md
+.gitignore
+.vscodeignore
