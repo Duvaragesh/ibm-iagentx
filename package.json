@@ -2,7 +2,7 @@
   "name": "ibm-iagentx",
   "displayName": "IBM iAgentX",
   "description": "Extends IBM i resources (source members, IFS, SQL, job logs) into VS Code AI agents — GitHub Copilot Chat and Claude Code — via MCP.",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "publisher": "Duvaragesh",
   "license": "MIT",
   "readme": "MARKETPLACE.md",
@@ -29,7 +29,7 @@
     "IBM Bob",
     "AI agent"
   ],
-  "extensionPack": [
+  "extensionDependencies": [
     "halcyontechltd.code-for-ibmi"
   ],
   "activationEvents": [
@@ -47,6 +47,11 @@
       {
         "command": "ibm-iagentx.reconnect",
         "title": "IBM iAgentX: Reconnect",
+        "category": "IBM iAgentX"
+      },
+      {
+        "command": "ibm-iagentx.manage",
+        "title": "IBM iAgentX: Manage MCP Server",
         "category": "IBM iAgentX"
       }
     ],

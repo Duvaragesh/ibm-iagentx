@@ -3,7 +3,8 @@ import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs/promises';
 import * as http from 'http';
-import { createHttpServer } from './mcpServer.js';
+import type { CodeForIBMi } from '@halcyontech/vscode-ibmi-types';
+import { createHttpServer, setLastActiveEditor } from './mcpServer.js';
 import { GetSourceMemberTool } from './tools/getSourceMember.js';
 import { ListSourceMembersTool } from './tools/listSourceMembers.js';
 import { ListSourceFilesTool } from './tools/listSourceFiles.js';
@@ -13,6 +14,10 @@ import { RunSqlTool } from './tools/runSql.js';
 import { GetJobLogTool } from './tools/getJobLog.js';
 import { RunClCommandTool } from './tools/runClCommand.js';
 import { ConnectionStatusTool } from './tools/connectionStatus.js';
+import { GetActiveEditorTool } from './tools/getActiveEditor.js';
+import { ListOpenEditorsTool } from './tools/listOpenEditors.js';
+import { UpdateActiveEditorTool } from './tools/updateActiveEditor.js';
+import { UpdateEditorByUriTool } from './tools/updateEditorByUri.js';
 
 const SERVER_NAME = 'ibm-iagentx';
 const OLD_SERVER_NAME = 'dk-ibmi-mcp'; // legacy key — removed from configs on first run
@@ -44,6 +49,19 @@ function listenWithFallback(
   };
 
   tryPort(preferred);
+}
+
+// Probe whether an iAgentX server is already running on this port.
+function probeExistingServer(port: number): Promise<boolean> {
+  return new Promise(resolve => {
+    const req = http.request(
+      { hostname: '127.0.0.1', port, method: 'POST', path: '/', headers: { 'Content-Type': 'application/json' } },
+      res => { res.resume(); resolve(res.statusCode === 200); }
+    );
+    req.setTimeout(400, () => { req.destroy(); resolve(false); });
+    req.on('error', () => resolve(false));
+    req.end(JSON.stringify({ jsonrpc: '2.0', method: 'ping', id: 1 }));
+  });
 }
 
 async function updateJsonConfig(
@@ -98,9 +116,6 @@ async function updateClaudeJson(port: number, channel: vscode.OutputChannel): Pr
 }
 
 async function updateVscodeMcpJson(port: number, channel: vscode.OutputChannel): Promise<boolean> {
-  // VS Code global MCP config: %APPDATA%/Code/User/mcp.json (Windows)
-  //                             ~/Library/Application Support/Code/User/mcp.json (macOS)
-  //                             ~/.config/Code/User/mcp.json (Linux)
   const platform = process.platform;
   let userDataDir: string;
   if (platform === 'win32') {
@@ -122,7 +137,7 @@ async function updateVscodeMcpJson(port: number, channel: vscode.OutputChannel):
   );
 }
 
-export function activate(context: vscode.ExtensionContext): void {
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const channel = vscode.window.createOutputChannel('IBM iAgentX');
   context.subscriptions.push(channel);
   channel.appendLine('[iAgentX] activate() called');
@@ -130,18 +145,148 @@ export function activate(context: vscode.ExtensionContext): void {
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   statusBar.text = '$(loading~spin) iAgentX';
   statusBar.tooltip = 'IBM iAgentX — starting…';
-  statusBar.command = 'ibm-iagentx.reconnect';
+  statusBar.command = 'ibm-iagentx.manage';
   statusBar.show();
   context.subscriptions.push(statusBar);
+
+  // Track the last focused editor so MCP tools can still reach it after
+  // focus moves to the terminal or chat panel.
+  setLastActiveEditor(vscode.window.activeTextEditor);
+  context.subscriptions.push(
+    vscode.window.onDidChangeActiveTextEditor(editor => setLastActiveEditor(editor))
+  );
 
   const cfg = vscode.workspace.getConfiguration('ibm-iagentx');
   const preferredPort: number = cfg.get('preferredPort') ?? 41927;
 
-  const server = createHttpServer();
-
-  // activePort is set once the server is listening; used by the reconnect command
+  type ServerState = 'starting' | 'running' | 'stopped' | 'disconnected' | 'shared';
+  let serverState: ServerState = 'starting';
+  let server: http.Server = createHttpServer();
   let activePort: number | undefined;
+  let mcpProvider: vscode.Disposable | undefined;
 
+  function updateStatusBar(): void {
+    switch (serverState) {
+      case 'starting':
+        statusBar.text    = '$(loading~spin) iAgentX';
+        statusBar.tooltip = 'IBM iAgentX — starting…';
+        break;
+      case 'running':
+        statusBar.text    = `$(check) iAgentX :${activePort}`;
+        statusBar.tooltip = `IBM iAgentX running on http://127.0.0.1:${activePort} — click to manage`;
+        break;
+      case 'disconnected':
+        statusBar.text    = `$(warning) iAgentX :${activePort}`;
+        statusBar.tooltip = 'IBM iAgentX — IBM i disconnected — IBM i tools unavailable (VS Code tools still work)';
+        break;
+      case 'stopped':
+        statusBar.text    = '$(circle-slash) iAgentX';
+        statusBar.tooltip = 'IBM iAgentX — MCP server stopped — click to manage';
+        break;
+      case 'shared':
+        statusBar.text    = `$(check) iAgentX :${activePort} (shared)`;
+        statusBar.tooltip = `IBM iAgentX — shared server on port ${activePort} (owned by another VS Code window)`;
+        break;
+    }
+  }
+
+  function registerMcpProvider(port: number): void {
+    mcpProvider?.dispose();
+    mcpProvider = vscode.lm.registerMcpServerDefinitionProvider(SERVER_NAME, {
+      provideMcpServerDefinitions(_token) {
+        return [new vscode.McpHttpServerDefinition(
+          'IBM iAgentX',
+          vscode.Uri.parse(`http://127.0.0.1:${port}`),
+          {}, '0.1.0'
+        )];
+      },
+    });
+  }
+
+  function stopServer(): Promise<void> {
+    return new Promise(resolve => {
+      server.close(() => {
+        serverState = 'stopped';
+        activePort = undefined;
+        updateStatusBar();
+        channel.appendLine('[iAgentX] MCP server stopped.');
+        resolve();
+      });
+    });
+  }
+
+  function startServer(): void {
+    serverState = 'starting';
+    updateStatusBar();
+    server = createHttpServer();
+
+    listenWithFallback(server, preferredPort, PORT_ATTEMPTS, (err, port) => {
+      if (err || port === undefined) {
+        const msg = `Failed to start server: ${err?.message}`;
+        channel.appendLine(`[iAgentX] ${msg}`);
+        vscode.window.showErrorMessage(`IBM iAgentX: ${msg}`);
+        statusBar.text    = '$(error) iAgentX';
+        statusBar.tooltip = `IBM iAgentX — failed: ${err?.message}`;
+        return;
+      }
+
+      activePort = port;
+      channel.appendLine(`[iAgentX] HTTP server listening on http://127.0.0.1:${port}`);
+
+      // Set initial IBM i connection state
+      const ibmiExt = vscode.extensions.getExtension<CodeForIBMi>('halcyontechltd.code-for-ibmi');
+      const isIbmiConnected = ibmiExt?.isActive && !!ibmiExt.exports.instance.getConnection();
+      serverState = (ibmiExt && !isIbmiConnected) ? 'disconnected' : 'running';
+      updateStatusBar();
+
+      registerMcpProvider(port);
+
+      Promise.all([
+        updateClaudeJson(port, channel),
+        updateVscodeMcpJson(port, channel),
+      ]).then(([claudeChanged, mcpChanged]) => {
+        channel.appendLine('[iAgentX] startServer() complete');
+        if (claudeChanged || mcpChanged) {
+          vscode.window.showInformationMessage(
+            `IBM iAgentX: Server registered on port ${port}. Start a new Claude Code session to use IBM i tools.`,
+            'OK'
+          );
+        }
+      }).catch(e => {
+        const msg = `Could not update config files: ${(e as Error).message}`;
+        channel.appendLine(`[iAgentX] WARNING — ${msg}`);
+        vscode.window.showWarningMessage(`IBM iAgentX: ${msg}`);
+      });
+    });
+  }
+
+  function subscribeToIbmiEvents(): void {
+    const ibmiExt = vscode.extensions.getExtension<CodeForIBMi>('halcyontechltd.code-for-ibmi');
+    if (!ibmiExt?.isActive) {
+      channel.appendLine('[iAgentX] Code for IBM i not active — IBM i event subscription skipped.');
+      return;
+    }
+    const instance = ibmiExt.exports.instance;
+
+    instance.subscribe(context, 'connected', 'iAgentX-connected', () => {
+      if (serverState !== 'stopped') {
+        serverState = 'running';
+        updateStatusBar();
+        channel.appendLine('[iAgentX] IBM i connected — status updated.');
+      }
+    });
+    instance.subscribe(context, 'disconnected', 'iAgentX-disconnected', () => {
+      if (serverState !== 'stopped') {
+        serverState = 'disconnected';
+        updateStatusBar();
+        channel.appendLine('[iAgentX] IBM i disconnected — status updated.');
+      }
+    });
+
+    channel.appendLine('[iAgentX] Subscribed to Code for IBM i connected/disconnected events.');
+  }
+
+  // Keep backward-compatible reconnect command
   const reconnect = vscode.commands.registerCommand('ibm-iagentx.reconnect', () => {
     if (activePort === undefined) {
       vscode.window.showWarningMessage('IBM iAgentX: Server is not running yet.');
@@ -161,67 +306,104 @@ export function activate(context: vscode.ExtensionContext): void {
   });
   context.subscriptions.push(reconnect);
 
-  // Register tools with VS Code's language model (GitHub Copilot Chat)
-  const lmTools: vscode.Disposable[] = [
-    vscode.lm.registerTool('ibmi_get_source_member',   new GetSourceMemberTool()),
-    vscode.lm.registerTool('ibmi_list_source_members', new ListSourceMembersTool()),
-    vscode.lm.registerTool('ibmi_list_source_files',   new ListSourceFilesTool()),
-    vscode.lm.registerTool('ibmi_get_ifs_file',        new GetIfsFileTool()),
-    vscode.lm.registerTool('ibmi_list_ifs_directory',  new ListIfsDirectoryTool()),
-    vscode.lm.registerTool('ibmi_run_sql',             new RunSqlTool()),
-    vscode.lm.registerTool('ibmi_get_job_log',         new GetJobLogTool()),
-    vscode.lm.registerTool('ibmi_run_cl_command',      new RunClCommandTool()),
-    vscode.lm.registerTool('ibmi_connection_status',   new ConnectionStatusTool()),
-  ];
-  context.subscriptions.push(...lmTools);
+  // Manage command — status bar click opens quick pick
+  const manage = vscode.commands.registerCommand('ibm-iagentx.manage', async () => {
+    type Item = vscode.QuickPickItem & { action: string };
+    const items: Item[] = [];
 
-  listenWithFallback(server, preferredPort, PORT_ATTEMPTS, (err, port) => {
-    if (err || port === undefined) {
-      const msg = `Failed to start server: ${err?.message}`;
-      channel.appendLine(`[iAgentX] ${msg}`);
-      vscode.window.showErrorMessage(`IBM iAgentX: ${msg}`);
-      statusBar.text = '$(error) iAgentX';
-      statusBar.tooltip = `IBM iAgentX — failed: ${err?.message}`;
+    if (serverState === 'running' || serverState === 'disconnected') {
+      items.push({ label: '$(debug-stop) Stop iAgentX server',    description: 'Shut down the iAgentX server',          action: 'stop'    });
+      items.push({ label: '$(refresh) Restart iAgentX server',    description: 'Stop and restart the iAgentX server',   action: 'restart' });
+      items.push({ label: '$(sync) Refresh iAgentX config',       description: 'Re-write ~/.claude.json and mcp.json',  action: 'refresh' });
+    } else if (serverState === 'stopped') {
+      items.push({ label: '$(play) Start iAgentX server',         description: 'Start the iAgentX server',              action: 'start'   });
+      items.push({ label: '$(sync) Refresh iAgentX config',       description: 'Re-write ~/.claude.json and mcp.json',  action: 'refresh' });
+    } else if (serverState === 'shared') {
+      items.push({ label: '$(sync) Refresh iAgentX config',       description: 'Re-write ~/.claude.json and mcp.json',  action: 'refresh' });
+    } else {
+      vscode.window.showInformationMessage('IBM iAgentX: Server is starting, please wait…');
       return;
     }
 
-    activePort = port;
-    channel.appendLine(`[iAgentX] HTTP server listening on http://127.0.0.1:${port}`);
-    statusBar.text = `$(check) iAgentX :${port}`;
-    statusBar.tooltip = `IBM iAgentX running on http://127.0.0.1:${port} — click to reconnect`;
+    const picked = await vscode.window.showQuickPick(items, {
+      placeHolder: `iAgentX MCP server — current state: ${serverState}`,
+    }) as Item | undefined;
+    if (!picked) { return; }
 
-    // Register with VS Code MCP registry (used by Copilot and MCP: List Servers)
-    const mcpProvider = vscode.lm.registerMcpServerDefinitionProvider(SERVER_NAME, {
-      provideMcpServerDefinitions(_token) {
-        return [new vscode.McpHttpServerDefinition(
-          'IBM iAgentX',
-          vscode.Uri.parse(`http://127.0.0.1:${port}`),
-          {}, '0.1.0'
-        )];
-      },
-    });
-    context.subscriptions.push(mcpProvider);
-
-    // Auto-configure both ~/.claude.json (Claude Code) and mcp.json (VS Code / Copilot)
-    Promise.all([
-      updateClaudeJson(port, channel),
-      updateVscodeMcpJson(port, channel),
-    ]).then(([claudeChanged, mcpChanged]) => {
-      channel.appendLine('[iAgentX] activate() complete');
-      if (claudeChanged || mcpChanged) {
-        vscode.window.showInformationMessage(
-          `IBM iAgentX: Server registered on port ${port}. Start a new Claude Code session to use IBM i tools.`,
-          'OK'
-        );
-      }
-    }).catch(e => {
-      const msg = `Could not update config files: ${(e as Error).message}`;
-      channel.appendLine(`[iAgentX] WARNING — ${msg}`);
-      vscode.window.showWarningMessage(`IBM iAgentX: ${msg}`);
-    });
+    switch (picked.action) {
+      case 'stop':
+        await stopServer();
+        break;
+      case 'start':
+        startServer();
+        break;
+      case 'restart':
+        await stopServer();
+        startServer();
+        break;
+      case 'refresh':
+        if (activePort === undefined) {
+          vscode.window.showWarningMessage('IBM iAgentX: Server is not running.');
+          return;
+        }
+        Promise.all([
+          updateClaudeJson(activePort, channel),
+          updateVscodeMcpJson(activePort, channel),
+        ]).then(() => {
+          vscode.window.showInformationMessage(
+            `IBM iAgentX: Config refreshed (port ${activePort}). Start a new Claude Code session if needed.`
+          );
+        }).catch(e => {
+          vscode.window.showWarningMessage(`IBM iAgentX: Refresh failed — ${(e as Error).message}`);
+        });
+        break;
+    }
   });
+  context.subscriptions.push(manage);
 
-  context.subscriptions.push({ dispose() { server.close(); } });
+  // Register tools with VS Code's language model (GitHub Copilot Chat)
+  const lmTools: vscode.Disposable[] = [
+    vscode.lm.registerTool('ibmi_get_source_member',    new GetSourceMemberTool()),
+    vscode.lm.registerTool('ibmi_list_source_members',  new ListSourceMembersTool()),
+    vscode.lm.registerTool('ibmi_list_source_files',    new ListSourceFilesTool()),
+    vscode.lm.registerTool('ibmi_get_ifs_file',         new GetIfsFileTool()),
+    vscode.lm.registerTool('ibmi_list_ifs_directory',   new ListIfsDirectoryTool()),
+    vscode.lm.registerTool('ibmi_run_sql',              new RunSqlTool()),
+    vscode.lm.registerTool('ibmi_get_job_log',          new GetJobLogTool()),
+    vscode.lm.registerTool('ibmi_run_cl_command',       new RunClCommandTool()),
+    vscode.lm.registerTool('ibmi_connection_status',    new ConnectionStatusTool()),
+    vscode.lm.registerTool('ibmi_get_active_editor',    new GetActiveEditorTool()),
+    vscode.lm.registerTool('ibmi_list_open_editors',    new ListOpenEditorsTool()),
+    vscode.lm.registerTool('ibmi_update_active_editor', new UpdateActiveEditorTool()),
+    vscode.lm.registerTool('ibmi_update_editor_by_uri', new UpdateEditorByUriTool()),
+  ];
+  context.subscriptions.push(...lmTools);
+
+  // Probe whether another VS Code window already owns a server on the preferred port.
+  const alreadyRunning = await probeExistingServer(preferredPort);
+  if (alreadyRunning) {
+    activePort = preferredPort;
+    serverState = 'shared';
+    updateStatusBar();
+    channel.appendLine(`[iAgentX] Existing server detected on port ${preferredPort} — shared mode.`);
+    registerMcpProvider(preferredPort);
+    await Promise.all([
+      updateClaudeJson(preferredPort, channel),
+      updateVscodeMcpJson(preferredPort, channel),
+    ]);
+    subscribeToIbmiEvents();
+    return;
+  }
+
+  startServer();
+  subscribeToIbmiEvents();
+
+  context.subscriptions.push({
+    dispose() {
+      mcpProvider?.dispose();
+      if (serverState !== 'shared') { server.close(); }
+    },
+  });
 }
 
 export function deactivate(): void {}

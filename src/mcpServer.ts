@@ -2,6 +2,89 @@ import * as http from 'http';
 import * as fs from 'fs/promises';
 import * as vscode from 'vscode';
 import { getConnection } from './ibmiConnection.js';
+import { parseEditorUri } from './utils/parseEditorUri.js';
+
+// vscode.window.activeTextEditor goes undefined whenever focus leaves the editor
+// (e.g. the user clicks into the Claude Code terminal to type a prompt).
+// We track the last editor that was active so MCP tools can still reach it.
+let lastActiveEditor: vscode.TextEditor | undefined;
+
+export function setLastActiveEditor(editor: vscode.TextEditor | undefined): void {
+  if (editor) { lastActiveEditor = editor; }
+}
+
+function getActiveEditor(): vscode.TextEditor | undefined {
+  return vscode.window.activeTextEditor ?? lastActiveEditor;
+}
+
+// If the AI passed literal \r\n or \n escape sequences instead of actual newlines,
+// normalise them so the file is written with real line breaks.
+function normaliseLineEndings(content: string): string {
+  if (!content.includes('\n') && content.includes('\\n')) {
+    return content.replace(/\\r\\n/g, '\r\n').replace(/\\n/g, '\n');
+  }
+  return content;
+}
+
+// Compute the minimal contiguous replacement needed between the current document
+// and newContent. Trimming unchanged lines from the top and bottom means Code for
+// IBM i's file-system provider only sees (and re-dates) the lines that truly changed.
+function minimalReplacement(
+  doc: vscode.TextDocument,
+  newLines: string[]
+): { range: vscode.Range; text: string } | null {
+  const oldCount = doc.lineCount;
+  const newCount = newLines.length;
+
+  let start = 0;
+  while (start < oldCount && start < newCount && doc.lineAt(start).text === newLines[start]) {
+    start++;
+  }
+  if (start === oldCount && start === newCount) {
+    return null; // identical — nothing to do
+  }
+
+  let endOld = oldCount - 1;
+  let endNew = newCount - 1;
+  while (endOld >= start && endNew >= start && doc.lineAt(endOld).text === newLines[endNew]) {
+    endOld--;
+    endNew--;
+  }
+
+  const rangeStart = doc.lineAt(start).range.start;
+  const rangeEnd   = doc.lineAt(endOld).range.end;
+  const text       = newLines.slice(start, endNew + 1).join('\n');
+  return { range: new vscode.Range(rangeStart, rangeEnd), text };
+}
+
+async function applyEditorUpdate(uri: vscode.Uri, newContent: string): Promise<void> {
+  newContent = normaliseLineEndings(newContent);
+  const info = parseEditorUri(uri);
+
+  const doc = await vscode.workspace.openTextDocument(uri);
+
+  // Split on \n but keep \r if present (CRLF lines stay intact for comparison)
+  const newLines = newContent.split('\n');
+
+  const patch = minimalReplacement(doc, newLines);
+  if (patch) {
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(uri, patch.range, patch.text);
+    await vscode.workspace.applyEdit(edit);
+  }
+
+  if ('ifsPath' in info) {
+    // IFS files have no SRCDAT concept — write directly via the streamfile API.
+    const conn = getConnection();
+    await conn.getContent().writeStreamfileRaw(info.ifsPath, newContent);
+  } else {
+    // For IBM i members and local files, save through VS Code's file-system provider.
+    // Code for IBM i's member: provider compares lines on save and only updates
+    // SRCDAT for lines that actually changed, so we must NOT call uploadMemberContent
+    // (which rewrites the whole member and resets every record's date).
+    await doc.save();
+  }
+}
 
 const TOOLS = [
   {
@@ -65,7 +148,13 @@ const TOOLS = [
   },
   {
     name: 'ibmi_connection_status',
-    description: 'Returns the current IBM i connection status. Use this to check whether a connection is active before running other tools.',
+    description: 'Returns the current IBM i connection status. Use this to check whether a connection is active before running other tools. ' +
+      'Available tools: ibmi_connection_status, ibmi_get_active_editor, ibmi_list_open_editors, ibmi_update_active_editor, ' +
+      'ibmi_update_editor_by_uri, ibmi_replace_in_active_editor, ibmi_get_source_member, ibmi_list_source_members, ' +
+      'ibmi_list_source_files, ibmi_get_ifs_file, ibmi_list_ifs_directory, ibmi_run_sql, ibmi_get_job_log, ibmi_run_cl_command. ' +
+      'The first six (ibmi_get_active_editor, ibmi_list_open_editors, ibmi_update_active_editor, ibmi_update_editor_by_uri, ' +
+      'ibmi_replace_in_active_editor) work without an IBM i connection; all others require one. ' +
+      'Fetch all needed tool schemas in a single ToolSearch call upfront rather than sequentially.',
     inputSchema: {
       type: 'object',
       properties: {},
@@ -106,6 +195,70 @@ const TOOLS = [
       required: ['command'],
     },
   },
+  {
+    name: 'ibmi_get_active_editor',
+    description: 'Returns the content and metadata of the currently focused VS Code editor. Works with IBM i member: URIs (source members) and streamfile: URIs (IFS files) opened via Code for i, as well as ordinary local files. ' +
+      'After reading, use ibmi_replace_in_active_editor for small or single-location changes; ' +
+      'use ibmi_update_active_editor only when multiple non-contiguous lines all change at once.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: 'ibmi_list_open_editors',
+    description: 'Lists all currently visible VS Code editor tabs with metadata (URI scheme, library/source-file/member for IBM i members, IFS path for streamfiles, local file path for others). Does not return file content — use ibmi_get_active_editor or call ibmi_update_editor_by_uri with the returned URI to read/write a specific tab.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: 'ibmi_update_active_editor',
+    description: 'Replaces the FULL content of the currently active VS Code editor and saves it back to IBM i (member or IFS file) or to disk for local files. ' +
+      'Use this only when multiple non-contiguous lines all need to change at once — for a single contiguous change, prefer ibmi_replace_in_active_editor which does not require sending the entire file. ' +
+      'IMPORTANT: the content parameter must contain actual newline characters (\\n or \\r\\n), not escaped sequences like \\\\n or \\\\r\\\\n. Preserve the exact line structure of the original source.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        content: { type: 'string', description: 'The complete new source content to write. Must use real newline characters, not escaped \\n sequences.' },
+      },
+      required: ['content'],
+    },
+  },
+  {
+    name: 'ibmi_update_editor_by_uri',
+    description: 'Replaces the full content of a specific open VS Code editor (identified by its URI string from ibmi_list_open_editors) and saves it back to IBM i or to disk. IMPORTANT: the content parameter must contain actual newline characters (\\n or \\r\\n), not escaped sequences like \\\\n or \\\\r\\\\n. Preserve the exact line structure of the original source.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        uri: { type: 'string', description: 'The full URI string of the editor to update (from ibmi_list_open_editors)' },
+        content: { type: 'string', description: 'The complete new source content to write. Must use real newline characters, not escaped \\n sequences.' },
+      },
+      required: ['uri', 'content'],
+    },
+  },
+  {
+    name: 'ibmi_replace_in_active_editor',
+    description:
+      'Makes a targeted find-and-replace in the currently active VS Code editor without ' +
+      'requiring the full file content. Finds the first occurrence of oldText (which must be ' +
+      'unique in the document), replaces it with newText, and saves. ' +
+      'PREFER THIS over ibmi_update_active_editor whenever only one contiguous block of text ' +
+      'is changing — it avoids sending the whole file and is SRCDAT-safe. ' +
+      'Returns the 1-based line number where the replacement was made. ' +
+      'Error if oldText is not found or appears more than once.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        oldText: { type: 'string', description: 'Exact text to find (must be unique in the file). Use real newlines (\\n) for multi-line spans.' },
+        newText: { type: 'string', description: 'Replacement text. Use real newline characters (\\n), not escaped \\\\n sequences.' },
+      },
+      required: ['oldText', 'newText'],
+    },
+  },
 ];
 
 function readBody(req: http.IncomingMessage): Promise<string> {
@@ -140,16 +293,30 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<an
     };
   }
 
-  const connection = getConnection();
-  const content = connection.getContent();
+  // These tools only use the VS Code editor API — they don't need an IBM i connection.
+  const VSCODE_ONLY_TOOLS = new Set([
+    'ibmi_get_active_editor',
+    'ibmi_list_open_editors',
+    'ibmi_update_active_editor',
+    'ibmi_update_editor_by_uri',
+    'ibmi_replace_in_active_editor',
+  ]);
+
+  if (!VSCODE_ONLY_TOOLS.has(name)) {
+    // Eagerly validate the connection for all IBM i tools so they fail fast with a clear error.
+    getConnection();
+  }
+
+  const getConn = () => getConnection();
+  const getContent = () => getConn().getContent();
 
   if (name === 'ibmi_get_source_member') {
     const lib = String(args.library).toUpperCase();
     const file = String(args.spf).toUpperCase();
     const mem = String(args.member).toUpperCase();
-    const members = await content.getMemberList({ library: lib, sourceFile: file, members: mem });
+    const members = await getContent().getMemberList({ library: lib, sourceFile: file, members: mem });
     const meta = members.find(m => m.name.toUpperCase() === mem);
-    const localPath = await content.downloadMemberContent(lib, file, mem);
+    const localPath = await getContent().downloadMemberContent(lib, file, mem);
     const text = await fs.readFile(localPath, 'utf-8');
     return {
       content: [{ type: 'text', text: JSON.stringify({
@@ -165,7 +332,7 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<an
     const lib = String(args.library).toUpperCase();
     const file = String(args.spf).toUpperCase();
     const filter = args.filter ? String(args.filter).toUpperCase() : undefined;
-    const members = await content.getMemberList({ library: lib, sourceFile: file, members: filter });
+    const members = await getContent().getMemberList({ library: lib, sourceFile: file, members: filter });
     const memberInfos = members.map(m => ({
       name: m.name, type: m.extension ?? '', description: m.text ?? '',
       lastModified: m.changed ? m.changed.toISOString() : null,
@@ -178,7 +345,7 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<an
 
   if (name === 'ibmi_list_source_files') {
     const lib = String(args.library).toUpperCase();
-    const objects = await content.getObjectList({ library: lib, types: ['*FILE'] });
+    const objects = await getContent().getObjectList({ library: lib, types: ['*FILE'] });
     const sourceFiles = objects.filter((o: { sourceFile?: boolean }) => o.sourceFile === true);
     const files = sourceFiles.map((o: { name: string; text?: string }) => ({
       name: o.name,
@@ -191,7 +358,7 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<an
 
   if (name === 'ibmi_get_ifs_file') {
     const ifsPath = String(args.path);
-    const buf = await content.downloadStreamfileRaw(ifsPath);
+    const buf = await getContent().downloadStreamfileRaw(ifsPath);
     const text = buf.toString('utf-8');
     return {
       content: [{ type: 'text', text: JSON.stringify({ path: ifsPath, content: text, size: buf.length }, null, 2) }],
@@ -200,7 +367,7 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<an
 
   if (name === 'ibmi_list_ifs_directory') {
     const ifsPath = String(args.path);
-    const files = await content.getFileList(ifsPath);
+    const files = await getContent().getFileList(ifsPath);
     const entries = files.map((f: { name: string; type: string; path: string; size?: number; modified?: Date; owner?: string }) => ({
       name: f.name,
       type: f.type,
@@ -223,7 +390,7 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<an
     if (!/^(SELECT|WITH|VALUES)\b/.test(trimmed)) {
       throw new Error('Only SELECT statements are allowed. DML and DDL are not permitted.');
     }
-    const rows = await connection.runSQL(query) as Record<string, unknown>[];
+    const rows = await getConn().runSQL(query) as Record<string, unknown>[];
     const sliced = rows.slice(0, maxRows);
     const columns = sliced.length > 0 ? Object.keys(sliced[0]) : [];
     return {
@@ -243,7 +410,7 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<an
     } else {
       query = `SELECT MESSAGE_ID, MESSAGE_TEXT, SEVERITY, MESSAGE_TYPE FROM TABLE(QSYS2.JOBLOG_INFO('*')) ORDER BY ORDINAL_POSITION DESC FETCH FIRST 100 ROWS ONLY`;
     }
-    const rows = await connection.runSQL(query) as Record<string, unknown>[];
+    const rows = await getConn().runSQL(query) as Record<string, unknown>[];
     const messages = rows.map(r => ({
       id: String(r['MESSAGE_ID'] ?? ''),
       text: String(r['MESSAGE_TEXT'] ?? ''),
@@ -263,13 +430,96 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<an
     if (!ALLOWED_PREFIXES.some(p => verb.startsWith(p))) {
       throw new Error(`Command not allowed. Only read-only commands starting with ${ALLOWED_PREFIXES.join(', ')} are permitted.`);
     }
-    const result = await connection.runCommand({ command, environment: 'ile' });
+    const result = await getConn().runCommand({ command, environment: 'ile' });
     return {
       content: [{ type: 'text', text: JSON.stringify({
         output: result.stdout ?? '',
         stderr: result.stderr || undefined,
         exitCode: result.code ?? 0,
       }, null, 2) }],
+    };
+  }
+
+  if (name === 'ibmi_get_active_editor') {
+    const editor = getActiveEditor();
+    if (!editor) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: 'No active editor' }) }] };
+    }
+    const uri = editor.document.uri;
+    const doc = await vscode.workspace.openTextDocument(uri);
+    const info = parseEditorUri(uri);
+    const result = {
+      ...info,
+      content: doc.getText(),
+      isDirty: editor.document.isDirty,
+      lineCount: editor.document.lineCount,
+    };
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  }
+
+  if (name === 'ibmi_list_open_editors') {
+    const activeEditor = getActiveEditor();
+    const editors = vscode.window.visibleTextEditors.map(editor => {
+      const uri = editor.document.uri;
+      const info = parseEditorUri(uri);
+      return {
+        ...info,
+        uri: uri.toString(),
+        isDirty: editor.document.isDirty,
+        lineCount: editor.document.lineCount,
+        isActive: editor === activeEditor,
+      };
+    });
+    return { content: [{ type: 'text', text: JSON.stringify(editors, null, 2) }] };
+  }
+
+  if (name === 'ibmi_update_active_editor') {
+    const editor = getActiveEditor();
+    if (!editor) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: 'No active editor' }) }] };
+    }
+    const uri = editor.document.uri;
+    const newContent = String(args.content);
+    await applyEditorUpdate(uri, newContent);
+    return { content: [{ type: 'text', text: JSON.stringify({ success: true, uri: uri.toString() }, null, 2) }] };
+  }
+
+  if (name === 'ibmi_update_editor_by_uri') {
+    const uri = vscode.Uri.parse(String(args.uri));
+    const newContent = String(args.content);
+    await applyEditorUpdate(uri, newContent);
+    return { content: [{ type: 'text', text: JSON.stringify({ success: true, uri: uri.toString() }, null, 2) }] };
+  }
+
+  if (name === 'ibmi_replace_in_active_editor') {
+    const editor = getActiveEditor();
+    if (!editor) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: 'No active editor' }) }] };
+    }
+
+    const oldText = normaliseLineEndings(String(args.oldText));
+    const newText = normaliseLineEndings(String(args.newText));
+    const doc = editor.document;
+    const fullText = doc.getText();
+
+    const firstIdx = fullText.indexOf(oldText);
+    if (firstIdx === -1) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: 'oldText not found in active editor document' }) }], isError: true };
+    }
+    const secondIdx = fullText.indexOf(oldText, firstIdx + 1);
+    if (secondIdx !== -1) {
+      return { content: [{ type: 'text', text: JSON.stringify({ error: 'oldText appears more than once in the document — make it more specific to uniquely identify the target location' }) }], isError: true };
+    }
+
+    const startPos = doc.positionAt(firstIdx);
+    const endPos   = doc.positionAt(firstIdx + oldText.length);
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(doc.uri, new vscode.Range(startPos, endPos), newText);
+    await vscode.workspace.applyEdit(edit);
+    await doc.save();
+
+    return {
+      content: [{ type: 'text', text: JSON.stringify({ success: true, uri: doc.uri.toString(), replacedAtLine: startPos.line + 1 }, null, 2) }],
     };
   }
 
