@@ -2,6 +2,13 @@
 
 All notable changes to IBM iAgentX are documented here.
 
+## [0.1.7] - 2026-06-16
+
+### Improved
+- **MARKETPLACE.md** updated to document all editor tools, new status bar states (shared, disconnected, stopped), manage menu options, multiple VS Code windows / shared server behaviour, and updated troubleshooting steps.
+
+---
+
 ## [0.1.6] - 2026-06-16
 
 ### Added
