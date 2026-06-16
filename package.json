@@ -5,7 +5,6 @@
   "version": "0.1.6",
   "publisher": "Duvaragesh",
   "license": "MIT",
-  "readme": "MARKETPLACE.md",
   "icon": "images/logo.png",
   "repository": {
     "type": "git",
@@ -82,7 +81,7 @@
   "scripts": {
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "npm run compile && vsce package"
+    "package": "npm run compile && vsce package --readme-path MARKETPLACE.md"
   },
   "devDependencies": {
     "@halcyontech/vscode-ibmi-types": "^2.0.0",
