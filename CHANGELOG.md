@@ -2,6 +2,13 @@
 
 All notable changes to IBM iAgentX are documented here.
 
+## [0.1.9] - 2026-06-17
+
+### Fixed
+- **Marketplace display** — extension overview in both VS Code IDE and the VS Code Marketplace now correctly show MARKETPLACE.md content. Previous publish used `vsce publish` directly, bypassing the `--readme-path` flag. Publishing now uses `npm run publish` which passes `--readme-path MARKETPLACE.md` to both `vsce package` and `vsce publish`.
+
+---
+
 ## [0.1.8] - 2026-06-16
 
 ### Added
