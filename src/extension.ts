@@ -20,6 +20,13 @@ import { UpdateActiveEditorTool } from './tools/updateActiveEditor.js';
 import { UpdateEditorByUriTool } from './tools/updateEditorByUri.js';
 import { GetSpoolFileTool } from './tools/getSpoolFile.js';
 import { FindJobsTool } from './tools/findJobs.js';
+import { ListObjectsTool } from './tools/listObjects.js';
+import { GetObjectInfoTool } from './tools/getObjectInfo.js';
+import { CheckObjectTool } from './tools/checkObject.js';
+import { GetDataAreaTool } from './tools/getDataArea.js';
+import { ListSpoolFilesTool } from './tools/listSpoolFiles.js';
+import { GetFileFieldsTool } from './tools/getFileFields.js';
+import { GetLibraryListTool } from './tools/getLibraryList.js';
 
 const SERVER_NAME = 'ibm-iagentx';
 const OLD_SERVER_NAME = 'dk-ibmi-mcp'; // legacy key — removed from configs on first run
@@ -423,6 +430,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.lm.registerTool('ibmi_update_editor_by_uri', new UpdateEditorByUriTool()),
     vscode.lm.registerTool('ibmi_get_spool_file',       new GetSpoolFileTool()),
     vscode.lm.registerTool('ibmi_find_jobs',            new FindJobsTool()),
+    vscode.lm.registerTool('ibmi_list_objects',         new ListObjectsTool()),
+    vscode.lm.registerTool('ibmi_get_object_info',      new GetObjectInfoTool()),
+    vscode.lm.registerTool('ibmi_check_object',         new CheckObjectTool()),
+    vscode.lm.registerTool('ibmi_get_data_area',        new GetDataAreaTool()),
+    vscode.lm.registerTool('ibmi_list_spool_files',     new ListSpoolFilesTool()),
+    vscode.lm.registerTool('ibmi_get_file_fields',      new GetFileFieldsTool()),
+    vscode.lm.registerTool('ibmi_get_library_list',     new GetLibraryListTool()),
   ];
   context.subscriptions.push(...lmTools);
 

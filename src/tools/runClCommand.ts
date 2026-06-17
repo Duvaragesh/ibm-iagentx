@@ -2,14 +2,12 @@ import * as vscode from 'vscode';
 import { getConnection } from '../ibmiConnection.js';
 import type { RunClCommandInput, RunClCommandOutput } from '../types.js';
 
-// Read-only CL command prefixes that are allowed by default
-const ALLOWED_PREFIXES = [
-  'DSP', 'LST', 'WRK', 'CHK', 'PRT', 'DMP', 'RTV', 'QRY',
-];
+// Read-only CL command prefixes allowed in ILE mode by default
+const DEFAULT_ALLOWED_PREFIXES = ['DSP', 'LST', 'WRK', 'CHK', 'PRT', 'DMP', 'RTV', 'QRY'];
 
-function isAllowed(command: string): boolean {
+function isAllowedIle(command: string, allowedPrefixes: string[]): boolean {
   const verb = command.trim().toUpperCase().split(/\s+/)[0];
-  return ALLOWED_PREFIXES.some(p => verb.startsWith(p));
+  return allowedPrefixes.some(p => verb.startsWith(p));
 }
 
 // CPYSPLF is allowed only when writing to TOFILE(*TOSTMF) with a path under /tmp/
@@ -25,15 +23,17 @@ export class RunClCommandTool implements vscode.LanguageModelTool<RunClCommandIn
     _token: vscode.CancellationToken
   ): Promise<vscode.LanguageModelToolResult> {
     const { command } = options.input;
-    const verb = command.trim().toUpperCase().split(/\s+/)[0];
+    const cfg = vscode.workspace.getConfiguration('ibm-iagentx');
+    const allowedPrefixes: string[] = cfg.get('clAllowedPrefixes') ?? DEFAULT_ALLOWED_PREFIXES;
 
+    const verb = command.trim().toUpperCase().split(/\s+/)[0];
     if (verb === 'CPYSPLF') {
       if (!validateCpySplf(command)) {
         throw new Error('CPYSPLF is only permitted with TOFILE(*TOSTMF) and a destination path under /tmp/');
       }
-    } else if (!isAllowed(command)) {
+    } else if (!isAllowedIle(command, allowedPrefixes)) {
       throw new Error(
-        `Command not allowed: only read-only commands starting with ${ALLOWED_PREFIXES.join(', ')} are permitted.`
+        `Command not allowed: only read-only commands starting with ${allowedPrefixes.join(', ')} are permitted.`
       );
     }
 

@@ -8,22 +8,27 @@ export class GetJobLogTool implements vscode.LanguageModelTool<GetJobLogInput> {
     options: vscode.LanguageModelToolInvocationOptions<GetJobLogInput>,
     _token: vscode.CancellationToken
   ): Promise<vscode.LanguageModelToolResult> {
-    const { job } = options.input;
+    const { job, minSeverity, messageType, maxMessages, includeTimestamp } = options.input;
     const connection = getConnection();
+    const fetchLimit = Math.min(maxMessages ?? 100, 500);
 
-    // Retrieve job log via SQL from QSYS2.JOBLOG_INFO — available on IBM i 7.2+
+    const conditions: string[] = [];
+    if (minSeverity !== undefined) { conditions.push(`SEVERITY >= ${Number(minSeverity)}`); }
+    if (messageType) { conditions.push(`MESSAGE_TYPE = '${messageType.toUpperCase()}'`); }
+    const whereClause = conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')}` : '';
+
+    const timestampCol = includeTimestamp ? ', MESSAGE_TIMESTAMP' : '';
     let query: string;
     if (job) {
       const parts = job.split('/');
       if (parts.length === 3) {
         const [number, user, name] = parts;
-        query = `SELECT MESSAGE_ID, MESSAGE_TEXT, SEVERITY, MESSAGE_TYPE FROM TABLE(QSYS2.JOBLOG_INFO('${number}/${user}/${name}')) ORDER BY ORDINAL_POSITION DESC FETCH FIRST 100 ROWS ONLY`;
+        query = `SELECT MESSAGE_ID, MESSAGE_TEXT, MESSAGE_SECOND_LEVEL_TEXT, SEVERITY, MESSAGE_TYPE${timestampCol} FROM TABLE(QSYS2.JOBLOG_INFO('${number}/${user}/${name}'))${whereClause} ORDER BY ORDINAL_POSITION DESC FETCH FIRST ${fetchLimit} ROWS ONLY`;
       } else {
         throw new Error('job must be in NUMBER/USER/NAME format, e.g. 123456/MYUSER/QZDASOINIT');
       }
     } else {
-      // Current job
-      query = `SELECT MESSAGE_ID, MESSAGE_TEXT, SEVERITY, MESSAGE_TYPE FROM TABLE(QSYS2.JOBLOG_INFO('*')) ORDER BY ORDINAL_POSITION DESC FETCH FIRST 100 ROWS ONLY`;
+      query = `SELECT MESSAGE_ID, MESSAGE_TEXT, MESSAGE_SECOND_LEVEL_TEXT, SEVERITY, MESSAGE_TYPE${timestampCol} FROM TABLE(QSYS2.JOBLOG_INFO('*'))${whereClause} ORDER BY ORDINAL_POSITION DESC FETCH FIRST ${fetchLimit} ROWS ONLY`;
     }
 
     let messages: JobMessage[];
@@ -32,8 +37,10 @@ export class GetJobLogTool implements vscode.LanguageModelTool<GetJobLogInput> {
       messages = rows.map(r => ({
         id: String(r['MESSAGE_ID'] ?? ''),
         text: String(r['MESSAGE_TEXT'] ?? ''),
+        secondLevelText: r['MESSAGE_SECOND_LEVEL_TEXT'] ? String(r['MESSAGE_SECOND_LEVEL_TEXT']) : undefined,
         severity: r['SEVERITY'] !== null && r['SEVERITY'] !== undefined ? Number(r['SEVERITY']) : undefined,
         type: r['MESSAGE_TYPE'] !== null && r['MESSAGE_TYPE'] !== undefined ? String(r['MESSAGE_TYPE']) : undefined,
+        sendTime: includeTimestamp && r['MESSAGE_TIMESTAMP'] != null ? String(r['MESSAGE_TIMESTAMP']) : undefined,
       }));
     } catch {
       // For ended jobs, fall back to reading the QPJOBLOG spool file via CPYSPLF
@@ -67,6 +74,8 @@ export class GetJobLogTool implements vscode.LanguageModelTool<GetJobLogInput> {
     _token: vscode.CancellationToken
   ): vscode.ProviderResult<vscode.PreparedToolInvocation> {
     const label = options.input.job ?? 'current job';
-    return { invocationMessage: `Retrieving job log for ${label}` };
+    const severityNote = options.input.minSeverity !== undefined ? ` (severity ≥ ${options.input.minSeverity})` : '';
+    const typeNote = options.input.messageType ? ` type=${options.input.messageType}` : '';
+    return { invocationMessage: `Retrieving job log for ${label}${severityNote}${typeNote}` };
   }
 }

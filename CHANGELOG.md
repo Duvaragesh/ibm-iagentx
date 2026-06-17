@@ -2,6 +2,41 @@
 
 All notable changes to IBM iAgentX are documented here.
 
+## [0.2.1] - 2026-06-17
+
+### Added
+
+**7 new IBM i object and catalog tools:**
+
+- **`ibmi_list_objects`** — lists objects in a library filtered by type (`*FILE`, `*PGM`, `*SRVPGM`, `*CMD`, `*DTAARA`, `*ALL`, etc.) and optional name pattern (trailing `*` wildcard). Returns up to 500 objects with name, type, attribute, owner, size, and last-used timestamp. Sourced from `QSYS2.OBJECT_STATISTICS`.
+- **`ibmi_get_object_info`** — detailed attributes of a single IBM i object: type, attribute, owner, size, creation time, last-modified time, and last-used time. Returns `{ exists: false }` when the object is not found — never throws, making it safe to use as a pre-check.
+- **`ibmi_check_object`** — lightweight existence check for any IBM i object. Returns `{ exists: true/false }` without throwing. Preferred over `ibmi_get_object_info` when only existence matters.
+- **`ibmi_get_data_area`** — reads the current value and attributes of an IBM i data area (`*DTAARA`) using `QSYS2.DATA_AREA_INFO`. Returns value as a string for all types (`*CHAR`, `*DEC`, `*LGL`), along with type and length.
+- **`ibmi_list_spool_files`** — lists spool file metadata for a job or user without fetching content. Accepts optional `job` (NUMBER/USER/NAME), `username`, `splfname`, and `maxFiles` (up to 200). Useful for discovering available spool files before calling `ibmi_get_spool_file`.
+- **`ibmi_get_file_fields`** — returns field definitions for an IBM i physical or logical file via `QSYS2.SYSCOLUMNS2`. Each field includes name, SQL type, length, precision/scale, nullability, default value, IBM i text description, and ordinal position.
+- **`ibmi_get_library_list`** — returns the current library list ordered by position via `QSYS2.LIBRARY_LIST_INFO`. Includes system (`*SYS`), product (`*PROD`), current (`*CUR`), and user (`*USR`) library types.
+
+**3 new shared utility modules (`src/utils/`):**
+
+- **`normaliseLineEndings.ts`** — extracted from `mcpServer.ts` for reuse across tools.
+- **`ccsidCast.ts`** — `castUtf8(expr, maxLen?)` helper that wraps a SQL column in `CAST(... AS VARCHAR(N) CCSID 1208)` to force UTF-8 transcoding of EBCDIC catalog text columns (used in `ibmi_get_file_fields`).
+- **`qsysPath.ts`** — `getQSYSObjectPath(library, name, type, member?, iasp?)` builds IFS-style `/QSYS.LIB/...` paths for IBM i objects.
+
+### Improved
+
+- **`ibmi_get_job_log`** — three new optional parameters:
+  - `messageType` — filter by message type (`*ESCAPE`, `*DIAG`, `*COMP`, `*INFO`, `*NOTIFY`, etc.)
+  - `maxMessages` — control how many messages to return (default 100, max 500)
+  - `includeTimestamp` — when `true`, each message includes a `sendTime` ISO timestamp
+- **`ibmi_run_sql`** — new `offset` parameter for pagination. Response now includes `offset` (echoed back) and `hasMore` (boolean indicating whether additional rows exist beyond the current page).
+- **`ibmi_get_spool_file`** — new `startLine` (1-based) and `lineCount` parameters for partial retrieval of large spool files. Response now includes `totalLines`, `returnedLines`, and `startLine` so agents can paginate through long output.
+- **`ibmi_connection_status`** — now returns `osVersion` (e.g. `V7R5M0`) queried from `QSYS2.SYSTEM_STATUS_INFO`. Omitted gracefully if unsupported.
+- **`ibmi_find_jobs`** — new `subsystem` parameter to filter active jobs by subsystem name (e.g. `QBATCH`, `QINTER`).
+- **`ibmi_run_cl_command`** — no functional change; internal cleanup only.
+- **`ibmi_connection_status`** tool description updated to list all 23 available tools.
+
+---
+
 ## [0.2.0] - 2026-06-17
 
 ### Fixed

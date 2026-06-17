@@ -7,7 +7,6 @@ const MAX_ROWS_LIMIT = 1000;
 
 function isSelectOnly(query: string): boolean {
   const trimmed = query.trim().toUpperCase();
-  // Allow SELECT, WITH (CTEs), VALUES
   return /^(SELECT|WITH|VALUES)\b/.test(trimmed);
 }
 
@@ -16,7 +15,6 @@ function isSelectOnly(query: string): boolean {
  * If SQL0104 is raised and the query has an unwrapped table function, retry with it wrapped.
  */
 function wrapTableFunctions(query: string): string {
-  // Match FROM/JOIN followed by schema.FUNCTION( not already preceded by TABLE(
   return query.replace(
     /\b(FROM|JOIN)\s+(?!TABLE\s*\()([A-Za-z][A-Za-z0-9_]*\.[A-Za-z][A-Za-z0-9_]*\s*\()/gi,
     (_match, kw: string, fn: string) => `${kw} TABLE(${fn}`
@@ -28,8 +26,9 @@ export class RunSqlTool implements vscode.LanguageModelTool<RunSqlInput> {
     options: vscode.LanguageModelToolInvocationOptions<RunSqlInput>,
     _token: vscode.CancellationToken
   ): Promise<vscode.LanguageModelToolResult> {
-    const { query, maxRows } = options.input;
+    const { query, maxRows, offset } = options.input;
     const limit = Math.min(maxRows ?? MAX_ROWS_DEFAULT, MAX_ROWS_LIMIT);
+    const skip = Math.max(offset ?? 0, 0);
 
     if (!isSelectOnly(query)) {
       throw new Error('Only SELECT statements are allowed. DML and DDL are not permitted.');
@@ -53,10 +52,13 @@ export class RunSqlTool implements vscode.LanguageModelTool<RunSqlInput> {
       }
     }
 
-    const sliced = rows.slice(0, limit);
+    // TypeScript-level offset slicing — avoids CTE-wrapping complexity
+    const paged = rows.slice(skip, skip + limit + 1);
+    const hasMore = paged.length > limit;
+    const sliced = paged.slice(0, limit);
     const columns = sliced.length > 0 ? Object.keys(sliced[0]) : [];
 
-    const result: RunSqlOutput = { rows: sliced, columns, rowCount: sliced.length };
+    const result: RunSqlOutput = { rows: sliced, columns, rowCount: sliced.length, offset: skip, hasMore };
     return new vscode.LanguageModelToolResult([
       new vscode.LanguageModelTextPart(JSON.stringify(result, null, 2)),
     ]);

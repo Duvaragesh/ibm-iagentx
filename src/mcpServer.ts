@@ -4,6 +4,7 @@ import * as vscode from 'vscode';
 import { getConnection } from './ibmiConnection.js';
 import { parseEditorUri } from './utils/parseEditorUri.js';
 import { readIfsAsText } from './utils/ifsRead.js';
+import { castUtf8 } from './utils/ccsidCast.js';
 
 // vscode.window.activeTextEditor goes undefined whenever focus leaves the editor
 // (e.g. the user clicks into the Claude Code terminal to type a prompt).
@@ -149,11 +150,12 @@ const TOOLS = [
   },
   {
     name: 'ibmi_connection_status',
-    description: 'Returns the current IBM i connection status. Use this to check whether a connection is active before running other tools. ' +
+    description: 'Returns the current IBM i connection status including OS version. Use this to check whether a connection is active before running other tools. ' +
       'Available tools: ibmi_connection_status, ibmi_get_active_editor, ibmi_list_open_editors, ibmi_update_active_editor, ' +
       'ibmi_update_editor_by_uri, ibmi_replace_in_active_editor, ibmi_get_source_member, ibmi_list_source_members, ' +
       'ibmi_list_source_files, ibmi_get_ifs_file, ibmi_list_ifs_directory, ibmi_run_sql, ibmi_get_job_log, ibmi_run_cl_command, ' +
-      'ibmi_get_spool_file, ibmi_find_jobs. ' +
+      'ibmi_get_spool_file, ibmi_find_jobs, ibmi_list_objects, ibmi_get_object_info, ibmi_check_object, ibmi_get_data_area, ' +
+      'ibmi_list_spool_files, ibmi_get_file_fields, ibmi_get_library_list. ' +
       'The first six (ibmi_get_active_editor, ibmi_list_open_editors, ibmi_update_active_editor, ibmi_update_editor_by_uri, ' +
       'ibmi_replace_in_active_editor) work without an IBM i connection; all others require one. ' +
       'Fetch all needed tool schemas in a single ToolSearch call upfront rather than sequentially.',
@@ -165,23 +167,28 @@ const TOOLS = [
   },
   {
     name: 'ibmi_run_sql',
-    description: 'Runs a read-only SQL SELECT query against DB2 for i and returns the result rows. Only SELECT, WITH (CTEs), and VALUES statements are permitted. NOTE: on V7R6+ table functions require the explicit TABLE() wrapper — use FROM TABLE(QSYS2.IFS_READ(...)) not FROM QSYS2.IFS_READ(...). The tool auto-retries with the wrapper on SQL0104, but writing it correctly avoids the extra round-trip.',
+    description: 'Runs a read-only SQL SELECT query against DB2 for i and returns the result rows. Only SELECT, WITH (CTEs), and VALUES statements are permitted. NOTE: on V7R6+ table functions require the explicit TABLE() wrapper — use FROM TABLE(QSYS2.IFS_READ(...)) not FROM QSYS2.IFS_READ(...). The tool auto-retries with the wrapper on SQL0104, but writing it correctly avoids the extra round-trip. Use offset for pagination.',
     inputSchema: {
       type: 'object',
       properties: {
         query: { type: 'string', description: 'SQL SELECT statement to execute' },
         maxRows: { type: 'number', description: 'Maximum rows to return (default 100, max 1000)' },
+        offset: { type: 'number', description: 'Number of rows to skip for pagination (default 0). Check hasMore in the response to determine if more rows exist.' },
       },
       required: ['query'],
     },
   },
   {
     name: 'ibmi_get_job_log',
-    description: 'Retrieves the most recent job log messages (up to 100). Defaults to the current job; pass a qualified job name (NUMBER/USER/NAME) to query another job.',
+    description: 'Retrieves job log messages (up to 100 by default, max 500). Returns structured message objects including second-level diagnostic text and optional timestamps. Defaults to the current job; pass a qualified job name (NUMBER/USER/NAME) to query another job.',
     inputSchema: {
       type: 'object',
       properties: {
         job: { type: 'string', description: 'Qualified job name in NUMBER/USER/NAME format, or omit for the current job' },
+        minSeverity: { type: 'number', description: 'Only return messages with severity >= this value (e.g. 30 for warnings, 40 for errors)' },
+        messageType: { type: 'string', description: 'Filter by message type: *ESCAPE, *DIAG, *COMP, *INFO, *NOTIFY, *REQUEST, *STATUS' },
+        maxMessages: { type: 'number', description: 'Maximum messages to return (default 100, max 500)' },
+        includeTimestamp: { type: 'boolean', description: 'When true, include sendTime (ISO timestamp) in each message' },
       },
       required: [],
     },
@@ -199,13 +206,15 @@ const TOOLS = [
   },
   {
     name: 'ibmi_get_spool_file',
-    description: 'Retrieves the text content of a spool file from an IBM i job. Use this to read QPJOBLOG or other spool files from completed or active jobs.',
+    description: 'Retrieves the text content of a spool file from an IBM i job. Use this to read QPJOBLOG or other spool files. Supports line range for large files — always returns totalLines so you can paginate.',
     inputSchema: {
       type: 'object',
       properties: {
         job: { type: 'string', description: 'Qualified job name in NUMBER/USER/NAME format, e.g. 899342/ADMIN/PPECPRC' },
         splfname: { type: 'string', description: 'Spool file name, e.g. QPJOBLOG' },
         splfnbr: { type: 'number', description: 'Spool file number. If omitted, returns the last/most recent matching spool file' },
+        startLine: { type: 'number', description: 'First line to return (1-based, default 1)' },
+        lineCount: { type: 'number', description: 'Number of lines to return. If omitted, returns all lines from startLine' },
       },
       required: ['job', 'splfname'],
     },
@@ -221,8 +230,95 @@ const TOOLS = [
         status: { type: 'string', enum: ['ACTIVE', 'OUTQ', 'ALL'], description: 'ACTIVE — active jobs only; OUTQ — ended jobs; ALL — both (default)' },
         date_from: { type: 'string', description: 'Start date filter in YYYY-MM-DD format (applies to ended jobs)' },
         date_to: { type: 'string', description: 'End date filter in YYYY-MM-DD format (applies to ended jobs)' },
+        subsystem: { type: 'string', description: 'Filter active jobs by subsystem name, e.g. QBATCH, QINTER' },
       },
       required: ['jobname'],
+    },
+  },
+  {
+    name: 'ibmi_list_objects',
+    description: 'Lists objects in an IBM i library filtered by type and/or name pattern. Returns up to 500 objects. Use nameFilter with a trailing * wildcard (e.g. BAT*) for large libraries.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        library: { type: 'string', description: 'Library name (e.g. MYLIB, QGPL)' },
+        objectType: { type: 'string', description: 'Object type filter: *FILE, *PGM, *SRVPGM, *CMD, *DTAARA, *DTAQ, *MSGF, *LIB, *ALL (default *ALL)' },
+        nameFilter: { type: 'string', description: 'Name filter with optional trailing wildcard, e.g. BAT* or MYPGM' },
+      },
+      required: ['library'],
+    },
+  },
+  {
+    name: 'ibmi_get_object_info',
+    description: 'Returns detailed attributes of a single IBM i object (type, owner, size, creation/modification/last-used timestamps). Returns exists:false when the object is not found — never throws.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        library: { type: 'string', description: 'Library name' },
+        name: { type: 'string', description: 'Object name' },
+        objectType: { type: 'string', description: 'Object type, e.g. *FILE, *PGM, *SRVPGM, *CMD, *DTAARA' },
+      },
+      required: ['library', 'name', 'objectType'],
+    },
+  },
+  {
+    name: 'ibmi_check_object',
+    description: 'Checks whether an IBM i object exists. Lightweight existence check — returns exists:true/false without throwing. Use before operations that require the object to exist.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        library: { type: 'string', description: 'Library name' },
+        name: { type: 'string', description: 'Object name' },
+        objectType: { type: 'string', description: 'Object type, e.g. *FILE, *PGM, *DTAARA' },
+      },
+      required: ['library', 'name', 'objectType'],
+    },
+  },
+  {
+    name: 'ibmi_get_data_area',
+    description: 'Reads the current value and attributes of an IBM i data area (*DTAARA). Returns the value as a string regardless of type (*CHAR, *DEC, *LGL).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        library: { type: 'string', description: 'Library containing the data area' },
+        name: { type: 'string', description: 'Data area name' },
+      },
+      required: ['library', 'name'],
+    },
+  },
+  {
+    name: 'ibmi_list_spool_files',
+    description: 'Lists spool file metadata for a job or user — without fetching content. Use this to discover available spool files before calling ibmi_get_spool_file.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        job: { type: 'string', description: 'Qualified job name in NUMBER/USER/NAME format. If omitted, lists for all jobs.' },
+        username: { type: 'string', description: 'Filter by user profile (used when job is omitted)' },
+        splfname: { type: 'string', description: 'Filter by spool file name, e.g. QPJOBLOG' },
+        maxFiles: { type: 'number', description: 'Maximum spool files to return (default 50, max 200)' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'ibmi_get_file_fields',
+    description: 'Returns field definitions (column metadata) for an IBM i physical or logical file. Includes field name, SQL type, length, precision/scale, nullability, and IBM i text description.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        library: { type: 'string', description: 'Library containing the file' },
+        file: { type: 'string', description: 'File name (physical or logical)' },
+      },
+      required: ['library', 'file'],
+    },
+  },
+  {
+    name: 'ibmi_get_library_list',
+    description: 'Returns the current library list for the IBM i connection, ordered by position. Includes system (*SYS), product (*PROD), current (*CUR), and user (*USR) libraries.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+      required: [],
     },
   },
   {
@@ -312,6 +408,15 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<an
     if (!conn) {
       return { content: [{ type: 'text', text: JSON.stringify({ connected: false }, null, 2) }] };
     }
+    let osVersion: string | undefined;
+    try {
+      const rows = await conn.runSQL(
+        `SELECT OS_RELEASE FROM TABLE(QSYS2.SYSTEM_STATUS_INFO()) FETCH FIRST 1 ROW ONLY`
+      ) as Record<string, unknown>[];
+      if (rows.length > 0 && rows[0]['OS_RELEASE'] != null) {
+        osVersion = String(rows[0]['OS_RELEASE']);
+      }
+    } catch { /* optional — skip on unsupported platforms */ }
     return {
       content: [{ type: 'text', text: JSON.stringify({
         connected: true,
@@ -319,6 +424,7 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<an
         user: conn.currentUser,
         port: conn.currentPort,
         connectionName: conn.currentConnectionName,
+        osVersion,
       }, null, 2) }],
     };
   }
@@ -415,6 +521,7 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<an
     const cfg = vscode.workspace.getConfiguration('ibm-iagentx');
     const defaultMax: number = cfg.get('sqlMaxRows') ?? 100;
     const maxRows = Math.min(Number(args.maxRows ?? defaultMax), 1000);
+    const offset = Math.max(Number(args.offset ?? 0), 0);
     const trimmed = query.trim().toUpperCase();
     if (!/^(SELECT|WITH|VALUES)\b/.test(trimmed)) {
       throw new Error('Only SELECT statements are allowed. DML and DDL are not permitted.');
@@ -438,15 +545,26 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<an
         throw e;
       }
     }
-    const sliced = rows.slice(0, maxRows);
+    const paged = rows.slice(offset, offset + maxRows + 1);
+    const hasMore = paged.length > maxRows;
+    const sliced = paged.slice(0, maxRows);
     const columns = sliced.length > 0 ? Object.keys(sliced[0]) : [];
     return {
-      content: [{ type: 'text', text: JSON.stringify({ rows: sliced, columns, rowCount: sliced.length }, null, 2) }],
+      content: [{ type: 'text', text: JSON.stringify({ rows: sliced, columns, rowCount: sliced.length, offset, hasMore }, null, 2) }],
     };
   }
 
   if (name === 'ibmi_get_job_log') {
     const jobArg = args.job ? String(args.job) : undefined;
+    const minSeverityArg = args.minSeverity !== undefined && args.minSeverity !== null ? Number(args.minSeverity) : undefined;
+    const messageTypeArg = args.messageType ? String(args.messageType).toUpperCase() : undefined;
+    const fetchLimit = Math.min(args.maxMessages != null ? Number(args.maxMessages) : 100, 500);
+    const includeTimestamp = args.includeTimestamp === true;
+    const conditions: string[] = [];
+    if (minSeverityArg !== undefined) { conditions.push(`SEVERITY >= ${minSeverityArg}`); }
+    if (messageTypeArg) { conditions.push(`MESSAGE_TYPE = '${messageTypeArg}'`); }
+    const whereClause = conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')}` : '';
+    const timestampCol = includeTimestamp ? ', MESSAGE_TIMESTAMP' : '';
     let query: string;
     if (jobArg) {
       const parts = jobArg.split('/');
@@ -454,18 +572,20 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<an
         throw new Error('job must be in NUMBER/USER/NAME format');
       }
       const [number, user, jobName] = parts;
-      query = `SELECT MESSAGE_ID, MESSAGE_TEXT, SEVERITY, MESSAGE_TYPE FROM TABLE(QSYS2.JOBLOG_INFO('${number}/${user}/${jobName}')) ORDER BY ORDINAL_POSITION DESC FETCH FIRST 100 ROWS ONLY`;
+      query = `SELECT MESSAGE_ID, MESSAGE_TEXT, MESSAGE_SECOND_LEVEL_TEXT, SEVERITY, MESSAGE_TYPE${timestampCol} FROM TABLE(QSYS2.JOBLOG_INFO('${number}/${user}/${jobName}'))${whereClause} ORDER BY ORDINAL_POSITION DESC FETCH FIRST ${fetchLimit} ROWS ONLY`;
     } else {
-      query = `SELECT MESSAGE_ID, MESSAGE_TEXT, SEVERITY, MESSAGE_TYPE FROM TABLE(QSYS2.JOBLOG_INFO('*')) ORDER BY ORDINAL_POSITION DESC FETCH FIRST 100 ROWS ONLY`;
+      query = `SELECT MESSAGE_ID, MESSAGE_TEXT, MESSAGE_SECOND_LEVEL_TEXT, SEVERITY, MESSAGE_TYPE${timestampCol} FROM TABLE(QSYS2.JOBLOG_INFO('*'))${whereClause} ORDER BY ORDINAL_POSITION DESC FETCH FIRST ${fetchLimit} ROWS ONLY`;
     }
-    let messages: { id: string; text: string; severity?: number; type?: string }[];
+    let messages: { id: string; text: string; secondLevelText?: string; severity?: number; type?: string; sendTime?: string }[];
     try {
       const rows = await getConn().runSQL(query) as Record<string, unknown>[];
       messages = rows.map(r => ({
         id: String(r['MESSAGE_ID'] ?? ''),
         text: String(r['MESSAGE_TEXT'] ?? ''),
+        secondLevelText: r['MESSAGE_SECOND_LEVEL_TEXT'] ? String(r['MESSAGE_SECOND_LEVEL_TEXT']) : undefined,
         severity: r['SEVERITY'] != null ? Number(r['SEVERITY']) : undefined,
         type: r['MESSAGE_TYPE'] != null ? String(r['MESSAGE_TYPE']) : undefined,
+        sendTime: includeTimestamp && r['MESSAGE_TIMESTAMP'] != null ? String(r['MESSAGE_TIMESTAMP']) : undefined,
       }));
     } catch {
       if (!jobArg) {
@@ -492,6 +612,7 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<an
 
   if (name === 'ibmi_run_cl_command') {
     const command = String(args.command);
+    const cfg = vscode.workspace.getConfiguration('ibm-iagentx');
     const verb = command.trim().toUpperCase().split(/\s+/)[0];
     if (verb === 'CPYSPLF') {
       const tofileMatch = /TOFILE\s*\(\s*\*TOSTMF\s*\)/i.test(command);
@@ -501,7 +622,6 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<an
         throw new Error('CPYSPLF is only permitted with TOFILE(*TOSTMF) and a destination path under /tmp/');
       }
     } else {
-      const cfg = vscode.workspace.getConfiguration('ibm-iagentx');
       const ALLOWED_PREFIXES: string[] = cfg.get('clAllowedPrefixes') ?? ['DSP', 'LST', 'WRK', 'CHK', 'PRT', 'DMP', 'RTV', 'QRY'];
       if (!ALLOWED_PREFIXES.some(p => verb.startsWith(p))) {
         throw new Error(`Command not allowed. Only read-only commands starting with ${ALLOWED_PREFIXES.join(', ')} are permitted.`);
@@ -551,10 +671,21 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<an
       if (/not found|CPF3307|CPF3330/i.test(stderr)) { throw new Error(`Job ${job} not found`); }
       throw new Error(`CPYSPLF failed: ${stderr || cmdResult.stdout || 'unknown error'}`);
     }
-    const { text: content } = await readIfsAsText(getConn(), tmpPath);
+    const { text: fullContent } = await readIfsAsText(getConn(), tmpPath);
     await getConn().runCommand({ command: `RMVLNK OBJLNK('${tmpPath}')`, environment: 'ile' }).catch(() => {});
+    const allLines = fullContent.split('\n');
+    const totalLines = allLines.length;
+    const startLine = args.startLine != null ? Math.max(Number(args.startLine) - 1, 0) : 0;
+    const lineCount = args.lineCount != null ? Number(args.lineCount) : totalLines;
+    const selectedLines = allLines.slice(startLine, startLine + lineCount);
     return {
-      content: [{ type: 'text', text: JSON.stringify({ job, splfname, splfnbr: resolvedSplfnbr, content, lineCount: content.split('\n').length }, null, 2) }],
+      content: [{ type: 'text', text: JSON.stringify({
+        job, splfname, splfnbr: resolvedSplfnbr,
+        content: selectedLines.join('\n'),
+        startLine: startLine + 1,
+        returnedLines: selectedLines.length,
+        totalLines,
+      }, null, 2) }],
     };
   }
 
@@ -569,8 +700,10 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<an
     const jobs: Record<string, unknown>[] = [];
 
     if (status === 'ACTIVE' || status === 'ALL') {
-      const userFilter = username ? ` AND JOB_USER = '${username}'` : '';
-      const activeQuery = `SELECT JOB_NAME_SHORT, JOB_USER, JOB_NUMBER, JOB_STATUS, JOB_ENTERED_SYSTEM_TIME, SUBSYSTEM FROM TABLE(QSYS2.ACTIVE_JOB_INFO(JOB_NAME_FILTER => '${jobPattern}')) WHERE 1=1${userFilter}`;
+      const activeConditions: string[] = ['1=1'];
+      if (username) { activeConditions.push(`JOB_USER = '${username}'`); }
+      if (args.subsystem) { activeConditions.push(`SUBSYSTEM = '${String(args.subsystem).toUpperCase()}'`); }
+      const activeQuery = `SELECT JOB_NAME_SHORT, JOB_USER, JOB_NUMBER, JOB_STATUS, JOB_ENTERED_SYSTEM_TIME, SUBSYSTEM FROM TABLE(QSYS2.ACTIVE_JOB_INFO(JOB_NAME_FILTER => '${jobPattern}')) WHERE ${activeConditions.join(' AND ')}`;
       const rows = await getConn().runSQL(activeQuery) as Record<string, unknown>[];
       for (const r of rows) {
         jobs.push({
@@ -692,6 +825,141 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<an
     return {
       content: [{ type: 'text', text: JSON.stringify({ success: true, uri: doc.uri.toString(), replacedAtLine: startPos.line + 1 }, null, 2) }],
     };
+  }
+
+  if (name === 'ibmi_list_objects') {
+    const lib = String(args.library).toUpperCase();
+    const objType = args.objectType ? String(args.objectType).toUpperCase() : '*ALL';
+    let nameClause = '';
+    if (args.nameFilter) {
+      const pattern = String(args.nameFilter).toUpperCase();
+      nameClause = ` WHERE OBJNAME LIKE '${pattern.endsWith('*') ? pattern.slice(0, -1) + '%' : pattern}'`;
+    }
+    const q = `SELECT OBJNAME, OBJTYPE, OBJATTRIBUTE, OBJTEXT, OBJOWNER, OBJSIZE, LAST_USED_TIMESTAMP FROM TABLE(QSYS2.OBJECT_STATISTICS(OBJECT_LIBRARY => '${lib}', OBJECT_TYPE => '${objType}'))${nameClause} ORDER BY OBJNAME FETCH FIRST 500 ROWS ONLY`;
+    const rows = await getConn().runSQL(q) as Record<string, unknown>[];
+    const objects = rows.map(r => ({
+      name: String(r['OBJNAME'] ?? ''), type: String(r['OBJTYPE'] ?? ''),
+      attribute: r['OBJATTRIBUTE'] != null ? String(r['OBJATTRIBUTE']) : '',
+      description: r['OBJTEXT'] != null ? String(r['OBJTEXT']) : '',
+      owner: r['OBJOWNER'] != null ? String(r['OBJOWNER']) : '',
+      size: r['OBJSIZE'] != null ? Number(r['OBJSIZE']) : null,
+      lastModified: r['LAST_USED_TIMESTAMP'] != null ? String(r['LAST_USED_TIMESTAMP']) : null,
+    }));
+    return { content: [{ type: 'text', text: JSON.stringify({ library: lib, objectType: objType, objects, total: objects.length }, null, 2) }] };
+  }
+
+  if (name === 'ibmi_get_object_info') {
+    const lib = String(args.library).toUpperCase();
+    const objName = String(args.name).toUpperCase();
+    const objType = String(args.objectType).toUpperCase();
+    const q = `SELECT OBJNAME, OBJTYPE, OBJATTRIBUTE, OBJTEXT, OBJOWNER, OBJSIZE, OBJCREATED, LAST_CHANGED_TIMESTAMP, LAST_USED_TIMESTAMP FROM TABLE(QSYS2.OBJECT_STATISTICS(OBJECT_LIBRARY => '${lib}', OBJECT_TYPE => '${objType}', OBJECT_NAME => '${objName}')) FETCH FIRST 1 ROW ONLY`;
+    const rows = await getConn().runSQL(q) as Record<string, unknown>[];
+    if (rows.length === 0) {
+      return { content: [{ type: 'text', text: JSON.stringify({ exists: false, library: lib, name: objName, objectType: objType }, null, 2) }] };
+    }
+    const r = rows[0];
+    return { content: [{ type: 'text', text: JSON.stringify({
+      exists: true, library: lib, name: String(r['OBJNAME'] ?? ''), objectType: String(r['OBJTYPE'] ?? ''),
+      attribute: r['OBJATTRIBUTE'] != null ? String(r['OBJATTRIBUTE']) : '',
+      description: r['OBJTEXT'] != null ? String(r['OBJTEXT']) : '',
+      owner: r['OBJOWNER'] != null ? String(r['OBJOWNER']) : '',
+      size: r['OBJSIZE'] != null ? Number(r['OBJSIZE']) : null,
+      createTime: r['OBJCREATED'] != null ? String(r['OBJCREATED']) : null,
+      lastModifiedTime: r['LAST_CHANGED_TIMESTAMP'] != null ? String(r['LAST_CHANGED_TIMESTAMP']) : null,
+      lastUsedTime: r['LAST_USED_TIMESTAMP'] != null ? String(r['LAST_USED_TIMESTAMP']) : null,
+    }, null, 2) }] };
+  }
+
+  if (name === 'ibmi_check_object') {
+    const lib = String(args.library).toUpperCase();
+    const objName = String(args.name).toUpperCase();
+    const objType = String(args.objectType).toUpperCase();
+    const q = `SELECT OBJNAME, OBJATTRIBUTE, OBJTEXT FROM TABLE(QSYS2.OBJECT_STATISTICS(OBJECT_LIBRARY => '${lib}', OBJECT_TYPE => '${objType}', OBJECT_NAME => '${objName}')) FETCH FIRST 1 ROW ONLY`;
+    const rows = await getConn().runSQL(q) as Record<string, unknown>[];
+    if (rows.length === 0) {
+      return { content: [{ type: 'text', text: JSON.stringify({ exists: false, library: lib, name: objName, objectType: objType }, null, 2) }] };
+    }
+    const r = rows[0];
+    return { content: [{ type: 'text', text: JSON.stringify({
+      exists: true, library: lib, name: String(r['OBJNAME'] ?? ''), objectType: objType,
+      attribute: r['OBJATTRIBUTE'] != null ? String(r['OBJATTRIBUTE']) : undefined,
+      description: r['OBJTEXT'] != null ? String(r['OBJTEXT']) : undefined,
+    }, null, 2) }] };
+  }
+
+  if (name === 'ibmi_get_data_area') {
+    const lib = String(args.library).toUpperCase();
+    const daName = String(args.name).toUpperCase();
+    const q = `SELECT DATA_AREA_VALUE, DATA_AREA_TYPE, DATA_AREA_LENGTH, DATA_AREA_TEXT FROM TABLE(QSYS2.DATA_AREA_INFO(DATA_AREA_NAME => '${daName}', DATA_AREA_LIBRARY => '${lib}')) FETCH FIRST 1 ROW ONLY`;
+    const rows = await getConn().runSQL(q) as Record<string, unknown>[];
+    if (rows.length === 0) { throw new Error(`Data area ${lib}/${daName} not found`); }
+    const r = rows[0];
+    return { content: [{ type: 'text', text: JSON.stringify({
+      library: lib, name: daName,
+      value: r['DATA_AREA_VALUE'] != null ? String(r['DATA_AREA_VALUE']) : '',
+      dataType: r['DATA_AREA_TYPE'] != null ? String(r['DATA_AREA_TYPE']) : '',
+      length: r['DATA_AREA_LENGTH'] != null ? Number(r['DATA_AREA_LENGTH']) : 0,
+      description: r['DATA_AREA_TEXT'] != null ? String(r['DATA_AREA_TEXT']) : '',
+    }, null, 2) }] };
+  }
+
+  if (name === 'ibmi_list_spool_files') {
+    const max = Math.min(args.maxFiles != null ? Number(args.maxFiles) : 50, 200);
+    const selectClause = `SELECT SPOOLED_FILE_NAME, SPOOLED_FILE_NUMBER, JOB_NAME, STATUS, TOTAL_PAGES, CREATE_TIMESTAMP, OUTPUT_QUEUE_NAME, OUTPUT_QUEUE_LIBRARY_NAME`;
+    let q: string;
+    if (args.job) {
+      const job = String(args.job);
+      if (job.split('/').length !== 3) { throw new Error('job must be in NUMBER/USER/NAME format'); }
+      const splfFilter = args.splfname ? ` WHERE SPOOLED_FILE_NAME = '${String(args.splfname).toUpperCase()}'` : '';
+      q = `${selectClause} FROM TABLE(QSYS2.SPOOLED_FILE_INFO(JOB_NAME => '${job}'))${splfFilter} ORDER BY SPOOLED_FILE_NUMBER DESC FETCH FIRST ${max} ROWS ONLY`;
+    } else {
+      const conds: string[] = [];
+      if (args.username) { conds.push(`JOB_USER_NAME = '${String(args.username).toUpperCase()}'`); }
+      if (args.splfname) { conds.push(`SPOOLED_FILE_NAME = '${String(args.splfname).toUpperCase()}'`); }
+      const where = conds.length > 0 ? ` WHERE ${conds.join(' AND ')}` : '';
+      q = `${selectClause} FROM TABLE(QSYS2.SPOOLED_FILE_INFO())${where} ORDER BY CREATE_TIMESTAMP DESC FETCH FIRST ${max} ROWS ONLY`;
+    }
+    const rows = await getConn().runSQL(q) as Record<string, unknown>[];
+    const spoolFiles = rows.map(r => ({
+      job: String(r['JOB_NAME'] ?? ''), splfname: String(r['SPOOLED_FILE_NAME'] ?? ''),
+      splfnbr: Number(r['SPOOLED_FILE_NUMBER'] ?? 0),
+      status: r['STATUS'] != null ? String(r['STATUS']) : '',
+      pages: r['TOTAL_PAGES'] != null ? Number(r['TOTAL_PAGES']) : null,
+      createTime: r['CREATE_TIMESTAMP'] != null ? String(r['CREATE_TIMESTAMP']) : null,
+      outputQueue: r['OUTPUT_QUEUE_NAME'] != null ? String(r['OUTPUT_QUEUE_NAME']) : '',
+      outputQueueLibrary: r['OUTPUT_QUEUE_LIBRARY_NAME'] != null ? String(r['OUTPUT_QUEUE_LIBRARY_NAME']) : '',
+    }));
+    return { content: [{ type: 'text', text: JSON.stringify({ spoolFiles, total: spoolFiles.length }, null, 2) }] };
+  }
+
+  if (name === 'ibmi_get_file_fields') {
+    const lib = String(args.library).toUpperCase();
+    const file = String(args.file).toUpperCase();
+    const q = `SELECT COLUMN_NAME, DATA_TYPE, LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE, IS_NULLABLE, COLUMN_DEFAULT, ${castUtf8('COLUMN_TEXT')} AS COLUMN_TEXT, ORDINAL_POSITION FROM QSYS2.SYSCOLUMNS2 WHERE TABLE_SCHEMA = '${lib}' AND TABLE_NAME = '${file}' ORDER BY ORDINAL_POSITION`;
+    const rows = await getConn().runSQL(q) as Record<string, unknown>[];
+    const fields = rows.map(r => ({
+      name: String(r['COLUMN_NAME'] ?? ''), type: String(r['DATA_TYPE'] ?? ''),
+      length: r['LENGTH'] != null ? Number(r['LENGTH']) : 0,
+      precision: r['NUMERIC_PRECISION'] != null ? Number(r['NUMERIC_PRECISION']) : null,
+      scale: r['NUMERIC_SCALE'] != null ? Number(r['NUMERIC_SCALE']) : null,
+      nullable: String(r['IS_NULLABLE'] ?? 'N').toUpperCase() === 'Y',
+      default: r['COLUMN_DEFAULT'] != null ? String(r['COLUMN_DEFAULT']) : null,
+      description: r['COLUMN_TEXT'] != null ? String(r['COLUMN_TEXT']) : '',
+      position: Number(r['ORDINAL_POSITION'] ?? 0),
+    }));
+    return { content: [{ type: 'text', text: JSON.stringify({ library: lib, file, fields, total: fields.length }, null, 2) }] };
+  }
+
+  if (name === 'ibmi_get_library_list') {
+    const rows = await getConn().runSQL(
+      `SELECT SYSTEM_SCHEMA_NAME, TYPE, SCHEMA_POSITION, SCHEMA_TEXT FROM QSYS2.LIBRARY_LIST_INFO ORDER BY SCHEMA_POSITION`
+    ) as Record<string, unknown>[];
+    const libraries = rows.map(r => ({
+      library: String(r['SYSTEM_SCHEMA_NAME'] ?? ''), type: String(r['TYPE'] ?? ''),
+      position: Number(r['SCHEMA_POSITION'] ?? 0),
+      description: r['SCHEMA_TEXT'] != null ? String(r['SCHEMA_TEXT']) : '',
+    }));
+    return { content: [{ type: 'text', text: JSON.stringify({ libraries, total: libraries.length }, null, 2) }] };
   }
 
   throw new Error(`Unknown tool: ${name}`);

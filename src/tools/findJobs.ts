@@ -7,10 +7,9 @@ export class FindJobsTool implements vscode.LanguageModelTool<FindJobsInput> {
     options: vscode.LanguageModelToolInvocationOptions<FindJobsInput>,
     _token: vscode.CancellationToken
   ): Promise<vscode.LanguageModelToolResult> {
-    const { jobname, username, status = 'ALL', date_from, date_to } = options.input;
+    const { jobname, username, status = 'ALL', date_from, date_to, subsystem } = options.input;
     const connection = getConnection();
 
-    // Convert trailing * wildcard to SQL % for ACTIVE_JOB_INFO filter / LIKE pattern
     const jobPattern = jobname.toUpperCase().endsWith('*')
       ? jobname.toUpperCase().slice(0, -1) + '%'
       : jobname.toUpperCase();
@@ -18,11 +17,13 @@ export class FindJobsTool implements vscode.LanguageModelTool<FindJobsInput> {
     const jobs: JobInfo[] = [];
 
     if (status === 'ACTIVE' || status === 'ALL') {
-      const userFilter = username ? ` AND JOB_USER = '${username.toUpperCase()}'` : '';
+      const conditions: string[] = ['1=1'];
+      if (username) { conditions.push(`JOB_USER = '${username.toUpperCase()}'`); }
+      if (subsystem) { conditions.push(`SUBSYSTEM = '${subsystem.toUpperCase()}'`); }
       const activeQuery =
         `SELECT JOB_NAME_SHORT, JOB_USER, JOB_NUMBER, JOB_STATUS, JOB_ENTERED_SYSTEM_TIME, SUBSYSTEM ` +
         `FROM TABLE(QSYS2.ACTIVE_JOB_INFO(JOB_NAME_FILTER => '${jobPattern}')) ` +
-        `WHERE 1=1${userFilter}`;
+        `WHERE ${conditions.join(' AND ')}`;
       const rows = await connection.runSQL(activeQuery) as Record<string, unknown>[];
       for (const r of rows) {
         jobs.push({
@@ -39,12 +40,13 @@ export class FindJobsTool implements vscode.LanguageModelTool<FindJobsInput> {
 
     if (status === 'OUTQ' || status === 'ALL') {
       const startTime = date_from ? `'${date_from} 00:00:00'` : 'CURRENT_TIMESTAMP - 7 DAYS';
-      const endFilter = date_to ? ` AND MESSAGE_TIMESTAMP <= '${date_to} 23:59:59'` : '';
-      const userFilter = username ? ` AND FROM_JOB_USER = '${username.toUpperCase()}'` : '';
+      const conditions: string[] = [`MESSAGE_ID = 'CPF1164'`, `FROM_JOB_NAME LIKE '${jobPattern}'`];
+      if (username) { conditions.push(`FROM_JOB_USER = '${username.toUpperCase()}'`); }
+      if (date_to) { conditions.push(`MESSAGE_TIMESTAMP <= '${date_to} 23:59:59'`); }
       const endedQuery =
         `SELECT FROM_JOB_NAME, FROM_JOB_USER, FROM_JOB_NUMBER, FROM_JOB, MESSAGE_TIMESTAMP, MESSAGE_TEXT ` +
         `FROM TABLE(QSYS2.HISTORY_LOG_INFO(START_TIME => ${startTime})) ` +
-        `WHERE MESSAGE_ID = 'CPF1164' AND FROM_JOB_NAME LIKE '${jobPattern}'${userFilter}${endFilter} ` +
+        `WHERE ${conditions.join(' AND ')} ` +
         `ORDER BY MESSAGE_TIMESTAMP DESC`;
       const rows = await connection.runSQL(endedQuery) as Record<string, unknown>[];
       for (const r of rows) {

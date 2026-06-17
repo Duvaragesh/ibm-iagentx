@@ -34,8 +34,6 @@ export interface ListSourceMembersOutput {
   total: number;
 }
 
-// Phase 2 — IFS + Browsing
-
 export interface ListSourceFilesInput {
   library: string;
 }
@@ -89,30 +87,38 @@ export interface ConnectionStatusOutput {
   user?: string;
   port?: number;
   connectionName?: string;
+  osVersion?: string;
 }
-
-// Phase 3 — Query & Diagnostics
 
 export interface RunSqlInput {
   query: string;
   maxRows?: number;
+  offset?: number;
 }
 
 export interface RunSqlOutput {
   rows: Record<string, unknown>[];
   columns: string[];
   rowCount: number;
+  offset: number;
+  hasMore: boolean;
 }
 
 export interface GetJobLogInput {
   job?: string;
+  minSeverity?: number;
+  messageType?: string;
+  maxMessages?: number;
+  includeTimestamp?: boolean;
 }
 
 export interface JobMessage {
   id: string;
   text: string;
+  secondLevelText?: string;
   severity?: number;
   type?: string;
+  sendTime?: string;
 }
 
 export interface GetJobLogOutput {
@@ -134,6 +140,8 @@ export interface GetSpoolFileInput {
   job: string;
   splfname: string;
   splfnbr?: number;
+  startLine?: number;
+  lineCount?: number;
 }
 
 export interface GetSpoolFileOutput {
@@ -141,7 +149,9 @@ export interface GetSpoolFileOutput {
   splfname: string;
   splfnbr: number;
   content: string;
-  lineCount: number;
+  startLine: number;
+  returnedLines: number;
+  totalLines: number;
 }
 
 export interface FindJobsInput {
@@ -150,6 +160,7 @@ export interface FindJobsInput {
   status?: 'ACTIVE' | 'OUTQ' | 'ALL';
   date_from?: string;
   date_to?: string;
+  subsystem?: string;
 }
 
 export interface JobInfo {
@@ -164,5 +175,138 @@ export interface JobInfo {
 
 export interface FindJobsOutput {
   jobs: JobInfo[];
+  total: number;
+}
+
+// Object catalog tools
+
+export interface ListObjectsInput {
+  library: string;
+  objectType?: string;
+  nameFilter?: string;
+}
+
+export interface ObjectInfo {
+  name: string;
+  type: string;
+  attribute: string;
+  description: string;
+  owner: string;
+  size: number | null;
+  lastModified: string | null;
+}
+
+export interface ListObjectsOutput {
+  library: string;
+  objectType: string;
+  objects: ObjectInfo[];
+  total: number;
+}
+
+export interface GetObjectInfoInput {
+  library: string;
+  name: string;
+  objectType: string;
+}
+
+export interface GetObjectInfoOutput {
+  exists: boolean;
+  library: string;
+  name: string;
+  objectType: string;
+  attribute?: string;
+  description?: string;
+  owner?: string;
+  size?: number | null;
+  createTime?: string | null;
+  lastModifiedTime?: string | null;
+  lastUsedTime?: string | null;
+}
+
+export interface CheckObjectInput {
+  library: string;
+  name: string;
+  objectType: string;
+}
+
+export interface CheckObjectOutput {
+  exists: boolean;
+  library: string;
+  name: string;
+  objectType: string;
+  attribute?: string;
+  description?: string;
+}
+
+export interface GetDataAreaInput {
+  library: string;
+  name: string;
+}
+
+export interface GetDataAreaOutput {
+  library: string;
+  name: string;
+  value: string;
+  dataType: string;
+  length: number;
+  description: string;
+}
+
+export interface ListSpoolFilesInput {
+  job?: string;
+  username?: string;
+  splfname?: string;
+  maxFiles?: number;
+}
+
+export interface SpoolFileInfo {
+  job: string;
+  splfname: string;
+  splfnbr: number;
+  status: string;
+  pages: number | null;
+  createTime: string | null;
+  outputQueue: string;
+  outputQueueLibrary: string;
+}
+
+export interface ListSpoolFilesOutput {
+  spoolFiles: SpoolFileInfo[];
+  total: number;
+}
+
+export interface GetFileFieldsInput {
+  library: string;
+  file: string;
+}
+
+export interface FieldInfo {
+  name: string;
+  type: string;
+  length: number;
+  precision: number | null;
+  scale: number | null;
+  nullable: boolean;
+  default: string | null;
+  description: string;
+  position: number;
+}
+
+export interface GetFileFieldsOutput {
+  library: string;
+  file: string;
+  fields: FieldInfo[];
+  total: number;
+}
+
+export interface LibraryEntry {
+  library: string;
+  type: string;
+  position: number;
+  description: string;
+}
+
+export interface GetLibraryListOutput {
+  libraries: LibraryEntry[];
   total: number;
 }

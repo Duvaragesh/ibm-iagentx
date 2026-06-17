@@ -17,9 +17,10 @@ Ask your AI agent to:
 - Edit open source members directly from the AI agent — surgical single-line replacements or full updates
 - Browse IFS files and directories
 - Query DB2 for i with plain SQL
+- Explore objects in a library — list by type, check existence, read data area values, inspect file fields
 - Pull job log messages by job ID — works for active and ended jobs alike
 - Retrieve spool file content (QPJOBLOG and others) from any job
-- Search for jobs by name pattern, user, and status
+- Search for jobs by name pattern, user, subsystem, and status
 - Run read-only CL commands (DSPFD, WRKACTJOB, …)
 
 Everything happens through the existing Code for IBM i SSH session.
@@ -32,6 +33,7 @@ Everything happens through the existing Code for IBM i SSH session.
 - [Code for IBM i](https://marketplace.visualstudio.com/items?itemName=halcyontechltd.code-for-ibmi) — installed and connected to an IBM i system
 - One or more of the supported AI agents:
   - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)
+  - [Claude Code VS Code extension](https://marketplace.visualstudio.com/items?itemName=anthropic.claude-code)
   - GitHub Copilot Chat (built into VS Code)
   - IBM Bob
 
@@ -47,6 +49,10 @@ code --install-extension Duvaragesh.ibm-iagentx
 
 No manual configuration required — the extension auto-configures Claude Code and VS Code
 on first activation.
+
+> **Tip — enable auto-updates:** IBM iAgentX is updated frequently with new tools and improvements.
+> In VS Code, go to **Extensions** → right-click **IBM iAgentX** → **Enable Auto Update**
+> to always stay on the latest version without manual action.
 
 ---
 
@@ -65,25 +71,75 @@ Copilot Chat picks this up without any manual steps.
 
 ### IBM Bob
 
-IBM Bob reads the same `mcp.json` entry — no extra configuration needed.
+IBM iAgentX auto-configures IBM Bob by writing to its MCP settings file. Set the
+`ibm-iagentx.bobAppDataFolder` setting to the app data folder name Bob uses on your machine
+(e.g. `IBMBob`) — leave it blank to skip Bob configuration.
+
+The file updated is:
+
+```
+%APPDATA%\<bobAppDataFolder>\User\globalStorage\saoudrizwan.claude-dev\settings\cline_mcp_settings.json
+```
+
+For example, with `bobAppDataFolder` set to `IBMBob`:
+
+```
+%APPDATA%\IBMBob\User\globalStorage\saoudrizwan.claude-dev\settings\cline_mcp_settings.json
+```
+
+The extension only updates this file if it already exists — confirming Bob is installed before writing.
 
 ---
 
 ## Available Tools
 
+**Connection & status**
+
 | Tool | Description |
 |---|---|
-| `ibmi_connection_status` | Check whether an IBM i connection is active |
+| `ibmi_connection_status` | Check connection status and IBM i OS version |
+
+**Source members & libraries**
+
+| Tool | Description |
+|---|---|
 | `ibmi_get_source_member` | Read the full source of a library/SPF/member |
 | `ibmi_list_source_members` | List members in a source physical file |
 | `ibmi_list_source_files` | List all source physical files in a library |
-| `ibmi_get_ifs_file` | Read a file from the IFS |
+| `ibmi_list_objects` | List objects in a library by type and name filter |
+| `ibmi_get_object_info` | Detailed attributes of an object (owner, size, timestamps) |
+| `ibmi_check_object` | Check whether an object exists — lightweight existence guard |
+| `ibmi_get_file_fields` | Field definitions for a physical or logical file |
+| `ibmi_get_library_list` | Current library list with type and position |
+
+**IFS**
+
+| Tool | Description |
+|---|---|
+| `ibmi_get_ifs_file` | Read a file from the IFS (EBCDIC-aware) |
 | `ibmi_list_ifs_directory` | List contents of an IFS directory |
-| `ibmi_run_sql` | Run a read-only SQL query against DB2 for i |
-| `ibmi_get_job_log` | Retrieve job log messages — active jobs and ended jobs (spool fallback) |
-| `ibmi_get_spool_file` | Retrieve the full text of any spool file (e.g. QPJOBLOG) from any job |
-| `ibmi_find_jobs` | Search for jobs by name pattern, user, and status (active or ended) |
+
+**SQL & data**
+
+| Tool | Description |
+|---|---|
+| `ibmi_run_sql` | Run a read-only SQL SELECT query against DB2 for i |
+| `ibmi_get_data_area` | Read the current value and attributes of a data area |
+
+**Jobs & diagnostics**
+
+| Tool | Description |
+|---|---|
+| `ibmi_get_job_log` | Retrieve job log messages with severity and type filtering |
+| `ibmi_find_jobs` | Search for jobs by name pattern, user, subsystem, and status |
+| `ibmi_list_spool_files` | List spool file metadata for a job or user |
+| `ibmi_get_spool_file` | Retrieve spool file content with optional line range |
 | `ibmi_run_cl_command` | Run a read-only CL command; CPYSPLF to `/tmp/` also permitted |
+
+**Editor (VS Code)**
+
+| Tool | Description |
+|---|---|
 | `ibmi_get_active_editor` | Read the content and metadata of the currently open editor |
 | `ibmi_list_open_editors` | List all visible editor tabs with URI and member info |
 | `ibmi_update_active_editor` | Replace the full content of the active editor and save |
@@ -99,6 +155,7 @@ IBM Bob reads the same `mcp.json` entry — no extra configuration needed.
 | `ibm-iagentx.preferredPort` | `41927` | HTTP port for the iAgentX server; falls back to next 4 ports if busy |
 | `ibm-iagentx.sqlMaxRows` | `100` | Default max rows returned by `ibmi_run_sql` (1–1000) |
 | `ibm-iagentx.clAllowedPrefixes` | `["DSP","LST","WRK","CHK","PRT","DMP","RTV","QRY"]` | CL verb prefixes permitted by `ibmi_run_cl_command` |
+| `ibm-iagentx.bobAppDataFolder` | `""` | App data folder name used by IBM Bob (e.g. `IBMBob`). Leave blank to skip Bob auto-configuration |
 
 ---
 
