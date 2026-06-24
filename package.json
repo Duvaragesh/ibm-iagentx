@@ -1,14 +1,14 @@
 {
-  "name": "ibm-iagentx",
-  "displayName": "IBM iAgentX",
+  "name": "iagentx4i",
+  "displayName": "iAgentX for IBM i",
   "description": "Extends IBM i resources (source members, IFS, SQL, job logs) into VS Code AI agents — GitHub Copilot Chat and Claude Code — via MCP.",
-  "version": "0.2.3",
+  "version": "0.0.1",
   "publisher": "Duvaragesh",
   "license": "MIT",
   "icon": "images/logo.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Duvaragesh/ibm-iagentx"
+    "url": "https://github.com/Duvaragesh/iagentx4i"
   },
   "engines": {
     "vscode": "^1.99.0",
@@ -40,33 +40,33 @@
   "contributes": {
     "mcpServerDefinitionProviders": [
       {
-        "id": "ibm-iagentx",
-        "label": "IBM iAgentX"
+        "id": "iagentx4i",
+        "label": "iAgentX for IBM i"
       }
     ],
     "commands": [
       {
-        "command": "ibm-iagentx.reconnect",
-        "title": "IBM iAgentX: Reconnect",
-        "category": "IBM iAgentX"
+        "command": "iagentx4i.reconnect",
+        "title": "iAgentX: Reconnect",
+        "category": "iAgentX for IBM i"
       },
       {
-        "command": "ibm-iagentx.manage",
-        "title": "IBM iAgentX: Manage MCP Server",
-        "category": "IBM iAgentX"
+        "command": "iagentx4i.manage",
+        "title": "iAgentX: Manage MCP Server",
+        "category": "iAgentX for IBM i"
       }
     ],
     "configuration": {
-      "title": "IBM iAgentX",
+      "title": "iAgentX for IBM i",
       "properties": {
-        "ibm-iagentx.sqlMaxRows": {
+        "iagentx4i.sqlMaxRows": {
           "type": "number",
           "default": 100,
           "minimum": 1,
           "maximum": 1000,
           "description": "Default maximum rows returned by ibmi_run_sql (1–1000)."
         },
-        "ibm-iagentx.clAllowedPrefixes": {
+        "iagentx4i.clAllowedPrefixes": {
           "type": "array",
           "items": {
             "type": "string"
@@ -83,12 +83,12 @@
           ],
           "description": "CL command verb prefixes permitted by ibmi_run_cl_command."
         },
-        "ibm-iagentx.preferredPort": {
+        "iagentx4i.preferredPort": {
           "type": "number",
           "default": 41927,
           "description": "Preferred HTTP port for the MCP server (falls back to +4 consecutive ports if busy)."
         },
-        "ibm-iagentx.bobAppDataFolder": {
+        "iagentx4i.bobAppDataFolder": {
           "type": "string",
           "default": "",
           "description": "App data folder name used by IBM Bob on this OS (e.g. 'IBMBob'). Leave blank to disable Bob auto-configuration. The full path resolved is: <appData>/<bobAppDataFolder>/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json"
