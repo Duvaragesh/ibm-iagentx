@@ -17,7 +17,7 @@ except ImportError:
     os.system(f"{sys.executable} -m playwright install chromium")
     from playwright.async_api import async_playwright
 
-HTML_PATH = Path(__file__).parent / "ibm-iagentx-demo.html"
+HTML_PATH = Path(__file__).parent / "iagentx4i-demo.html"
 OUT_DIR   = Path(__file__).parent / "gifs"
 OUT_DIR.mkdir(exist_ok=True)
 
